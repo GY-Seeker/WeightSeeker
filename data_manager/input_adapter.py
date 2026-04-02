@@ -150,7 +150,19 @@ class InputAdapter(nn.Module):
         Returns:
             Any: 模型输出。
         """
-        raise NotImplementedError("待实现")
+        # 将辅助输入中所有 Tensor 同步到 x 所在的设备
+        synced_aux: Dict[str, Any] = {}
+        for key, val in self.auxiliary_inputs.items():
+            if isinstance(val, torch.Tensor):
+                synced_aux[key] = val.to(x.device)
+            else:
+                synced_aux[key] = val
+
+        logger.debug(
+            "BIND_AUXILIARY 前向传播：辅助输入键=%s",
+            list(synced_aux.keys()),
+        )
+        return self.model(x, **synced_aux)
 
     def _forward_dict_expand(self, x: Dict[str, Any]) -> Any:
         """
@@ -169,7 +181,12 @@ class InputAdapter(nn.Module):
         Raises:
             TypeError: x 不是 dict 时抛出，错误消息说明实际类型。
         """
-        raise NotImplementedError("待实现")
+        if not isinstance(x, dict):
+            raise TypeError(
+                f"DICT_EXPAND 模式要求输入为 dict，实际类型为 {type(x).__name__}"
+            )
+        logger.debug("DICT_EXPAND 前向传播：输入键=%s", list(x.keys()))
+        return self.model(**x)
 
     @classmethod
     def from_signature(
@@ -201,7 +218,62 @@ class InputAdapter(nn.Module):
             推断结果会通过 logging.info() 输出选中的策略，
             低置信度情况（多参数无辅助输入）会通过 warnings.warn() 打印警告。
         """
-        raise NotImplementedError("待实现")
+        # 处理 DataParallel 包装
+        raw_model = model
+        if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            raw_model = model.module  # type: ignore[attr-defined]
+
+        # 检测 forward 必选参数
+        sig = inspect.signature(raw_model.forward)
+        required_params = []
+        has_var_keyword = False
+        for name, param in sig.parameters.items():
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                has_var_keyword = True
+            elif param.kind == inspect.Parameter.VAR_POSITIONAL:
+                continue
+            elif param.default is inspect.Parameter.empty:
+                required_params.append(name)
+
+        num_required = len(required_params)
+
+        # 推断策略
+        if has_var_keyword and not required_params:
+            # **kwargs 形式 -> DICT_EXPAND
+            strategy = AdaptStrategy.DICT_EXPAND
+            logger.info(
+                "from_signature: 检测到 **kwargs 参数，选择策略 DICT_EXPAND"
+            )
+        elif num_required <= 1:
+            strategy = AdaptStrategy.PASSTHROUGH
+            logger.info(
+                "from_signature: 必选参数数量=%d，选择策略 PASSTHROUGH",
+                num_required,
+            )
+        else:
+            # 多必选参数
+            if auxiliary_inputs is not None:
+                strategy = AdaptStrategy.BIND_AUXILIARY
+                logger.info(
+                    "from_signature: 必选参数=%s，提供了 auxiliary_inputs，选择策略 BIND_AUXILIARY",
+                    required_params,
+                )
+            else:
+                strategy = AdaptStrategy.PASSTHROUGH
+                warnings.warn(
+                    f"模型 forward 有多个必选参数 {required_params}，"
+                    "但未提供 auxiliary_inputs，回退到 PASSTHROUGH 策略。"
+                    "如需多输入适配，请传入 auxiliary_inputs 参数。",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                logger.warning(
+                    "from_signature: 模型有多个必选参数 %s 但未提供 auxiliary_inputs，"
+                    "回退到 PASSTHROUGH",
+                    required_params,
+                )
+
+        return cls(model=model, strategy=strategy, auxiliary_inputs=auxiliary_inputs)
 
     def get_wrapped_model(self) -> nn.Module:
         """
@@ -232,4 +304,9 @@ class InputAdapter(nn.Module):
         Returns:
             InputAdapter: self（支持链式调用）。
         """
-        raise NotImplementedError("待实现")
+        logger.info("InputAdapter 迁移到设备：%s", device)
+        self.model.to(device)
+        for key, val in self.auxiliary_inputs.items():
+            if isinstance(val, torch.Tensor):
+                self.auxiliary_inputs[key] = val.to(device)
+        return self

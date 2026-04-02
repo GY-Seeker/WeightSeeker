@@ -53,10 +53,15 @@ from .analyzer.global_diagnosis import GlobalDiagnosisEngine
 from .analyzer.anomaly_detector import AnomalyDetector
 
 # 可视化模块
-from .visualization.heatmap import HeatmapGenerator
-from .visualization.charts import ChartGenerator
-from .visualization.exporters import ResultExporter
-from .visualization.dashboard import Dashboard
+from .visualization.heatmap import HeatmapRenderer
+from .visualization.charts import (
+    plot_layer_importance,
+    plot_head_scatter,
+    plot_accumulator_stats,
+    save_figure,
+)
+# from .visualization.exporters import ResultExporter  # 未来扩展
+# from .visualization.dashboard import Dashboard  # 未来扩展
 
 # 数据管理模块
 from .data_manager.model_loader import ModelLoader
@@ -116,10 +121,13 @@ __all__ = [
     "GlobalDiagnosisEngine",
     "AnomalyDetector",
     # 可视化
-    "HeatmapGenerator",
-    "ChartGenerator",
-    "ResultExporter",
-    "Dashboard",
+    "HeatmapRenderer",
+    "plot_layer_importance",
+    "plot_head_scatter",
+    "plot_accumulator_stats",
+    "save_figure",
+    # "ResultExporter",  # 未来扩展
+    # "Dashboard",  # 未来扩展
     # 数据管理
     "ModelLoader",
     "DataManager",
