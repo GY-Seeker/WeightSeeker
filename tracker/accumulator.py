@@ -34,36 +34,46 @@ class CrossSampleAccumulator:
         _expert_selection_count: 专家选中计数，形状 (num_experts,)，MoE架构
     """
 
-    def __init__(self, model_info: ModelInfo, limit: int = 100000) -> None:
+    def __init__(self, model_info: ModelInfo, limit: int = 100000, device: Optional[str] = None) -> None:
         """初始化累积器。
 
         Args:
             model_info: 模型信息，包含层数、头数等
             limit: 样本上限，超过此值将抛出 AccumulatorOverflowError
+            device: 设备字符串（如 'cuda:0', 'cpu'），默认从 model_info 推断
         """
         self._model_info = model_info
         self._limit = limit
         self._sample_count = 0
+        
+        # 确定设备
+        if device is None:
+            if hasattr(model_info, 'device') and model_info.device:
+                self._device = model_info.device
+            else:
+                self._device = 'cpu'  # 默认使用 CPU
+        else:
+            self._device = device
 
         num_layers = model_info.num_layers
         num_heads = model_info.num_heads
 
-        # 初始化统计缓冲区（全部为零张量）
+        # 初始化统计缓冲区（全部为零张量，移到正确设备）
         # 头激活频率计数 (num_layers, num_heads)
-        self._head_activation_freq = torch.zeros(num_layers, num_heads, dtype=torch.float32)
+        self._head_activation_freq = torch.zeros(num_layers, num_heads, dtype=torch.float32, device=self._device)
 
         # 集中度累加 (num_layers, num_heads)
-        self._head_concentration_sum = torch.zeros(num_layers, num_heads, dtype=torch.float32)
+        self._head_concentration_sum = torch.zeros(num_layers, num_heads, dtype=torch.float32, device=self._device)
 
         # 层梯度范数累加 (num_layers,)
-        self._layer_gradient_norm_sum = torch.zeros(num_layers, dtype=torch.float32)
+        self._layer_gradient_norm_sum = torch.zeros(num_layers, dtype=torch.float32, device=self._device)
 
         # 注意力梯度范数累加 (num_layers, num_heads)
-        self._attention_gradient_norm_sum = torch.zeros(num_layers, num_heads, dtype=torch.float32)
+        self._attention_gradient_norm_sum = torch.zeros(num_layers, num_heads, dtype=torch.float32, device=self._device)
 
         # 专家选中计数 (num_experts,)，如果是 MoE 架构
         if model_info.num_experts is not None and model_info.num_experts > 0:
-            self._expert_selection_count = torch.zeros(model_info.num_experts, dtype=torch.float32)
+            self._expert_selection_count = torch.zeros(model_info.num_experts, dtype=torch.float32, device=self._device)
         else:
             self._expert_selection_count = None
 

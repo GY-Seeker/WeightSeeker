@@ -187,19 +187,26 @@ def plot_accumulator_stats(
         ax_left.set_title("Head Activation Frequency", fontsize=10)
         ax_left.axis("off")
 
-    # 右图：层梯度范数柱状图
+    # 右图：层梯度范数折线图
     ax_right = axes[1]
     if grad_norm.size > 0:
-        layers = [str(i) for i in range(len(grad_norm))]
-        ax_right.bar(layers, grad_norm, color="#DD8452", edgecolor="white", linewidth=0.5)
+        layers = list(range(len(grad_norm)))
+        ax_right.plot(layers, grad_norm, marker='o', linestyle='-', 
+                     color='#DD8452', linewidth=2, markersize=6,
+                     markerfacecolor='white', markeredgewidth=1.5, 
+                     markeredgecolor='#DD8452')
         ax_right.set_title("Layer Gradient Norm", fontsize=10)
         ax_right.set_xlabel("Layer Index", fontsize=9)
         ax_right.set_ylabel("Gradient L2 Norm", fontsize=9)
-        ax_right.set_xticks(range(len(layers)))
-        ax_right.set_xticklabels(layers,
+        ax_right.set_xticks(layers)
+        ax_right.set_xticklabels([str(i) for i in layers],
                                   rotation=45 if len(layers) > 10 else 0,
                                   fontsize=8)
         ax_right.grid(axis="y", linestyle="--", alpha=0.5)
+        # 添加数值标签
+        for i, v in enumerate(grad_norm):
+            ax_right.annotate(f'{v:.3f}', (i, v), textcoords="offset points",
+                            xytext=(0, 5), ha='center', fontsize=7)
     else:
         ax_right.text(0.5, 0.5, "No data", ha="center", va="center")
         ax_right.set_title("Layer Gradient Norm", fontsize=10)

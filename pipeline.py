@@ -235,6 +235,7 @@ class AnalysisPipeline:
             self._accumulator = CrossSampleAccumulator(
                 model_info=self._model_info,
                 limit=self.config.accumulator_limit,
+                device=self._device,  # 传入当前设备，确保张量在同一设备上
             )
 
         # 6. 初始化分析器
@@ -567,9 +568,22 @@ class AnalysisPipeline:
         os.makedirs(output_dir, exist_ok=True)
         saved_paths: Dict[str, str] = {}
 
-        # HeatmapRenderer（骨架未实现时跳过）
+        # HeatmapRenderer - 生成所有头的全景热力图
         if self._heatmap_renderer is not None:
             try:
+                # 1. 所有层所有头的完整热力图面板（每行 6 个）
+                if attention_maps:
+                    all_heads_path = os.path.join(output_dir, "all_heads_attention_heatmap.png")
+                    self._heatmap_renderer.render_multihead_all_heads(
+                        attention_maps=attention_maps,
+                        title="All Attention Heads Heatmap (6 columns)",
+                        save_path=all_heads_path,
+                        num_cols=6,
+                    )
+                    saved_paths["all_heads_heatmap"] = all_heads_path
+                    logger.info("已生成所有头的热力图：%s", all_heads_path)
+                
+                # 2. 传统单头热力图（兼容旧接口）
                 attn_path = os.path.join(output_dir, "attention_heatmap.png")
                 if attention_maps:
                     first_attn = next(iter(attention_maps.values()))
@@ -581,9 +595,23 @@ class AnalysisPipeline:
                     else:
                         render_attn = first_attn
                     self._heatmap_renderer.render_attention(
-                        render_attn, title="Attention Heatmap", save_path=attn_path
+                        render_attn, title="Attention Heatmap (Layer 0, Head 0)", save_path=attn_path
                     )
                     saved_paths["attention_heatmap"] = attn_path
+                    logger.info("已生成单头热力图：%s", attn_path)
+                    
+                # 3. 多层对比面板
+                if len(attention_maps) > 1:
+                    multi_layer_path = os.path.join(output_dir, "multi_layer_attention.png")
+                    self._heatmap_renderer.render_multi_layer(
+                        layer_maps=attention_maps,
+                        title="Multi-Layer Attention Comparison",
+                        save_path=multi_layer_path,
+                        num_cols=4,
+                    )
+                    saved_paths["multi_layer_comparison"] = multi_layer_path
+                    logger.info("已生成多层对比图：%s", multi_layer_path)
+                    
             except Exception as e:
                 logger.error("热力图渲染失败：%s", e)
 

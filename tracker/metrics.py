@@ -109,8 +109,9 @@ class MetricsCalculator:
         # 注意力形状: (B, H, N, N) 或 (B, H, N)
         num_heads = first_attention.shape[1] if first_attention.dim() >= 2 else 1
 
-        # 初始化激活频率张量 (num_layers, num_heads)
-        activation_freq = torch.zeros(num_layers, num_heads, dtype=torch.float32)
+        # 初始化激活频率张量 (num_layers, num_heads)，与输入设备一致
+        device = first_attention.device
+        activation_freq = torch.zeros(num_layers, num_heads, dtype=torch.float32, device=device)
 
         for layer_idx, attention in attention_maps.items():
             # attention 形状: (B, H, N, N) 或 (B, H, N)

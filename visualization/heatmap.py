@@ -105,6 +105,116 @@ class HeatmapRenderer:
     # 公共接口
     # ------------------------------------------------------------------
 
+    def render_multihead_all_heads(
+        self,
+        attention_maps: Dict[int, Tensor],
+        title: str = "",
+        save_path: Optional[str] = None,
+        num_cols: int = 6,
+    ) -> NDArray:
+        """
+        渲染所有层的所有注意力头的热力图面板。
+        
+        每行显示 num_cols 个头，行数根据总头数自动计算。
+        支持多个层的注意力图，每层独立一个子图区域。
+
+        Args:
+            attention_maps: {layer_idx: tensor} 字典，每个 tensor 形状为 (B, H, L, L)。
+            title: 图表总标题。
+            save_path: 保存路径，None 则不保存。
+            num_cols: 每行显示的列数，默认 6 个。
+
+        Returns:
+            NDArray: 面板 RGB 数组，dtype uint8。
+        """
+        if not attention_maps:
+            fig, ax = plt.subplots(figsize=self.figsize, dpi=self.dpi)
+            ax.axis("off")
+            rgb = self._fig_to_rgb(fig)
+            self._save_fig(fig, save_path)
+            return rgb
+
+        # 获取第一层的注意力图来确定头数和尺寸
+        first_layer_idx = sorted(attention_maps.keys())[0]
+        first_attn = attention_maps[first_layer_idx]  # (B, H, L, L)
+        
+        # 取第一个 batch 样本
+        if first_attn.dim() == 4:
+            first_attn = first_attn[0]  # (H, L, L)
+        elif first_attn.dim() == 3:
+            # 可能已经是 (H, L, L)
+            pass
+        
+        num_heads = first_attn.shape[0]
+        seq_len = first_attn.shape[1]
+        
+        # 计算总层数和总图数
+        num_layers = len(attention_maps)
+        total_plots = num_layers * num_heads
+        
+        # 计算行列数
+        ncols = min(num_cols, total_plots)
+        nrows = math.ceil(total_plots / ncols)
+        
+        # 创建子图
+        fig, axes = plt.subplots(
+            nrows, ncols,
+            figsize=(ncols * 2.5, nrows * 2.5),
+            dpi=self.dpi,
+            squeeze=False
+        )
+        
+        if title:
+            fig.suptitle(title, fontsize=12, fontweight='bold')
+        
+        plot_idx = 0
+        for layer_idx in sorted(attention_maps.keys()):
+            attn = attention_maps[layer_idx]
+            
+            # 取第一个 batch
+            if attn.dim() == 4:
+                attn_sample = attn[0].detach().cpu().numpy()  # (H, L, L)
+            elif attn.dim() == 3:
+                attn_sample = attn.detach().cpu().numpy()
+            else:
+                continue
+            
+            # 绘制该层的所有头
+            for head_idx in range(min(num_heads, attn_sample.shape[0])):
+                if plot_idx >= nrows * ncols:
+                    break
+                    
+                row = plot_idx // ncols
+                col = plot_idx % ncols
+                ax = axes[row][col]
+                
+                head_attn = attn_sample[head_idx]  # (L, L)
+                arr_norm = _percentile_clip_normalize(head_attn)
+                
+                im = ax.imshow(arr_norm, aspect='auto', cmap=self.cmap,
+                              vmin=0, vmax=1, interpolation='nearest')
+                ax.set_title(f'L{layer_idx} H{head_idx}', fontsize=7)
+                ax.set_xlabel('Key', fontsize=5)
+                ax.set_ylabel('Query', fontsize=5)
+                ax.tick_params(labelsize=4)
+                
+                # 只在每行的最后一个图添加 colorbar
+                if col == ncols - 1:
+                    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                
+                plot_idx += 1
+        
+        # 关闭多余的子图
+        for i in range(plot_idx, nrows * ncols):
+            row = i // ncols
+            col = i % ncols
+            axes[row][col].axis('off')
+        
+        plt.tight_layout()
+        rgb = self._fig_to_rgb(fig)
+        self._save_fig(fig, save_path)
+        return rgb
+
     def render_attention(
         self,
         attention_map: Tensor,
