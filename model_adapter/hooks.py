@@ -55,48 +55,132 @@ class HookManager:
 
     def register_all_hooks(self) -> Dict[str, List[RemovableHandle]]:
         """注册全套数据捕获探针。
-
+    
         根据已识别的模型架构自动遍历子模块，在注意力层和Transformer
         Block输出处注册前向Hook。
-
+            
+        内置行为：
+        1. 遍历模型所有子模块
+        2. 若检测到 nn.TransformerEncoderLayer，自动对其 self_attn 注册
+           补丁 Hook：在 Hook 内部调用 F.multi_head_attention_forward
+           并强制 need_weights=True，捕获真实的注意力权重矩阵。
+        3. 对其他支持标准输出格式的注意力层，注册常规前向 Hook。
+    
         Returns:
             Dict[str, List[RemovableHandle]]: 以Hook类型为键、Hook句柄列表
             为值的字典，例如 ``{"attention": [...], "hidden_state": [...]}``。
-
+    
         Raises:
             HookRegistrationError: 若未能在模型中找到任何注意力层或Block
                 模块，导致无法注册对应类型的Hook时抛出。
         """
         attention_handles: List[RemovableHandle] = []
         hidden_handles: List[RemovableHandle] = []
-
-        # 注册注意力Hook
-        layer_idx = 0
+    
+        # 第一阶段：检测 nn.TransformerEncoderLayer，为其注册补丁 Hook
+        # 这类层默认 need_weights=False，需要特殊处理才能捕获注意力权重
+        patched_attn_modules: set = set()  # 记录已被补丁处理的注意力模块 id
+        patch_layer_idx = 0
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.TransformerEncoderLayer):
+                attn_module = getattr(module, 'self_attn', None)
+                if attn_module is not None and isinstance(attn_module, nn.MultiheadAttention):
+                    handle = self._make_attn_weight_patch_hook(attn_module, patch_layer_idx)
+                    attention_handles.append(handle)
+                    patched_attn_modules.add(id(attn_module))
+                    patch_layer_idx += 1
+    
+        # 第二阶段：对未被补丁的其他注意力模块注册常规 Hook
+        layer_idx = patch_layer_idx  # 继续层索引，避免重复
         for name, module in self.model.named_modules():
             if self._is_attention_module(name, module):
-                handle = self.register_attention_hook(layer_idx, module)
-                attention_handles.append(handle)
-                layer_idx += 1
-
-        # 注册隐藏状态Hook（以Block/Layer为单位）
+                if id(module) not in patched_attn_modules:
+                    handle = self.register_attention_hook(layer_idx, module)
+                    attention_handles.append(handle)
+                    layer_idx += 1
+    
+        # 第三阶段：注册隐藏状态 Hook（以Block/Layer为单位）
         hidden_layer_idx = 0
         for name, module in self.model.named_modules():
             if self._is_block_module(name, module):
                 handle = self.register_hidden_state_hook(hidden_layer_idx, module)
                 hidden_handles.append(handle)
                 hidden_layer_idx += 1
-
+    
         if not attention_handles:
             raise HookRegistrationError(hook_type="attention")
         if not hidden_handles:
             # 对部分模型，可能没有显式Block；此时不强制抛错，但给出警告。
             # 为保持简单实现，这里仅在无任何Block时发出异常。
             raise HookRegistrationError(hook_type="hidden_state")
-
+    
         return {
             "attention": attention_handles,
             "hidden_state": hidden_handles,
         }
+    
+    def _make_attn_weight_patch_hook(
+        self, attn_module: nn.MultiheadAttention, layer_idx: int
+    ) -> RemovableHandle:
+        """创建注意力权重补丁 Hook。
+            
+        解决 nn.TransformerEncoderLayer 默认 need_weights=False 导致
+        注意力权重为 None 的问题。通过在 Hook 内部直接调用
+        ``F.multi_head_attention_forward`` 并设置 ``need_weights=True``，
+        强制重新计算并捕获注意力权重矩阵。
+            
+        Args:
+            attn_module: TransformerEncoderLayer 的 self_attn 子模块
+            layer_idx: 层索引，用于存储结果
+            
+        Returns:
+            RemovableHandle: Hook句柄，可用于后续移除
+        """
+        def hook(mod: nn.Module, inp: Tuple[Any, ...], out: Any) -> None:
+            """Hook回调：通过底层 API 重新计算并捕获注意力权重。"""
+            # inp[0] 为该注意力层的输入序列
+            src = inp[0].detach()
+            try:
+                import torch.nn.functional as F
+                in_proj_weight = attn_module.in_proj_weight
+                in_proj_bias = attn_module.in_proj_bias
+                out_proj_weight = attn_module.out_proj.weight
+                out_proj_bias = attn_module.out_proj.bias
+                embed_dim = attn_module.embed_dim
+                num_heads = attn_module.num_heads
+    
+                # batch_first 处理：若该层为 batch_first 模式，
+                # src 形状为 (B, L, D)，需转置为 (L, B, D)
+                if getattr(attn_module, 'batch_first', False):
+                    src_t = src.transpose(0, 1)
+                else:
+                    src_t = src
+    
+                _, attn_w = F.multi_head_attention_forward(
+                    src_t, src_t, src_t,
+                    embed_dim_to_check=embed_dim,
+                    num_heads=num_heads,
+                    in_proj_weight=in_proj_weight,
+                    in_proj_bias=in_proj_bias,
+                    bias_k=attn_module.bias_k,
+                    bias_v=attn_module.bias_v,
+                    add_zero_attn=attn_module.add_zero_attn,
+                    dropout_p=0.0,
+                    out_proj_weight=out_proj_weight,
+                    out_proj_bias=out_proj_bias,
+                    training=False,
+                    need_weights=True,
+                    average_attn_weights=False,
+                )
+                if attn_w is not None:
+                    # attn_w 形状: (B, num_heads, L, L)
+                    self._hook_storage["attention"][layer_idx] = attn_w.detach().clone()
+            except Exception:
+                pass  # 如果失败不影响主流程
+    
+        handle = attn_module.register_forward_hook(hook)
+        self._handles.append(handle)
+        return handle
 
     def register_attention_hook(self, layer_idx: int, module: nn.Module) -> RemovableHandle:
         """注册标准注意力Hook。

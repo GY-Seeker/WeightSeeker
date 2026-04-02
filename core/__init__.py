@@ -5,8 +5,10 @@
 
 from .config import Config
 from .types import (
+    AdaptStrategy,
     AnalysisConfig,
     AttentionMap,
+    DetectionResult,
     DiagnosisReport,
     FusionStrategyType,
     GradientMap,
@@ -36,6 +38,8 @@ __all__ = [
     "Quadrant",
     "FusionStrategyType",
     "HookType",
+    "AdaptStrategy",
+    "DetectionResult",
     "ModelInfo",
     "AccumulatorState",
     "HeadClassification",

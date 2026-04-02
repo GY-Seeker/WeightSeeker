@@ -12,6 +12,8 @@ from .core.types import (
     Quadrant,
     FusionStrategyType,
     HookType,
+    AdaptStrategy,
+    DetectionResult,
     ModelInfo,
     AccumulatorState,
     HeadClassification,
@@ -50,10 +52,6 @@ from .analyzer.quadrant import QuadrantAnalyzer
 from .analyzer.global_diagnosis import GlobalDiagnosisEngine
 from .analyzer.anomaly_detector import AnomalyDetector
 
-# 融合模块
-from .fusion.strategies import FusionStrategy, ProductFusion, WeightedSumFusion, AttentionMaskFusion
-from .fusion.composer import FusionComposer
-
 # 可视化模块
 from .visualization.heatmap import HeatmapGenerator
 from .visualization.charts import ChartGenerator
@@ -73,7 +71,7 @@ from .utils.io_utils import IOUtils
 # 主入口
 from .pipeline import AnalysisPipeline
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Transformer Analyzer Team"
 
 __all__ = [
@@ -83,6 +81,8 @@ __all__ = [
     "Quadrant",
     "FusionStrategyType",
     "HookType",
+    "AdaptStrategy",
+    "DetectionResult",
     "ModelInfo",
     "AccumulatorState",
     "HeadClassification",
@@ -115,12 +115,6 @@ __all__ = [
     "QuadrantAnalyzer",
     "GlobalDiagnosisEngine",
     "AnomalyDetector",
-    # 融合
-    "FusionStrategyType",
-    "ProductFusion",
-    "WeightedSumFusion",
-    "AttentionMaskFusion",
-    "FusionComposer",
     # 可视化
     "HeatmapGenerator",
     "ChartGenerator",

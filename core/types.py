@@ -97,9 +97,40 @@ class HookType(Enum):
     HIDDEN_STATE = auto()
 
 
+class AdaptStrategy(Enum):
+    """输入适配策略枚举，用于 InputAdapter 的适配模式选择。
+    
+    - PASSTHROUGH: 单输入直通，模型本身只有一个输入，不需要适配
+    - BIND_AUXILIARY: 辅助输入绑定，固定辅助输入为预设张量，仅主输入变化
+    - DICT_EXPAND: 字典展开，输入为 dict，将各 key 展开为位置参数
+    """
+    
+    PASSTHROUGH = "passthrough"      # 单输入直通
+    BIND_AUXILIARY = "bind_auxiliary"  # 绑定辅助输入
+    DICT_EXPAND = "dict_expand"       # 字典展开
+
+
 # =============================================================================
 # 数据类定义
 # =============================================================================
+
+@dataclass
+class DetectionResult:
+    """架构探测结果数据类，包含探测置信度和警告信息。
+    
+    由 :class:`ArchitectureDetector` 的 ``detect_with_confidence()`` 方法返回，
+    用于在低置信度场景下向用户提示潜在误判风险。
+    
+    Attributes:
+        model_info: 探测到的模型信息对象
+        confidence: 探测置信度，范围 [0.0, 1.0]
+        warnings: 探测过程中产生的警告信息列表（低置信度时非空）
+    """
+    
+    model_info: "ModelInfo"
+    confidence: float = 1.0  # 0.0~1.0，探测置信度
+    warnings: List[str] = field(default_factory=list)  # 探测过程中的警告信息
+
 
 @dataclass
 class ModelInfo:

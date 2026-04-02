@@ -1,56 +1,22 @@
 """
-结果导出模块
+结果导出模块（未来扩展）
+
+======================================================
+[未来扩展] 本模块当前不提供实际功能实现。
+------------------------------------------------------
+根据 design.md §3.6（设计说明），ReportExporter（自动生成 HTML/PDF 综合分析报告）
+属于过早优化，当前阶段无需实现。
+
+当前阶段的图表保存需求已由以下方式覆盖：
+- visualization/charts.py 中的 save_figure() 工具函数（保存 matplotlib 图表）
+- HeatmapRenderer 各渲染方法的 save_path 参数（保存热力图）
+
+未来如需自动化报告生成，可在此处扩展 ReportExporter，
+实现 HTML / PDF 格式的综合分析报告输出。
+======================================================
 """
 
-from typing import Dict, Any
-import torch
-from torch import Tensor
-import numpy as np
-from numpy import ndarray as NDArray
-from matplotlib.figure import Figure
-
-
-class ResultExporter:
-    """结果导出器"""
-    
-    def __init__(self, output_dir: str) -> None:
-        """
-        初始化导出器
-        
-        Args:
-            output_dir: 输出目录
-        """
-        pass
-    
-    def export_heatmap(self, 
-                      heatmap: NDArray, 
-                      filename: str,
-                      format: str = "png") -> str:
-        """导出热力图为图像文件"""
-        pass
-    
-    def export_chart(self,
-                    figure: Figure,
-                    filename: str,
-                    format: str = "png",
-                    dpi: int = 300) -> str:
-        """导出图表"""
-        pass
-    
-    def export_statistics_json(self, 
-                              statistics: Dict[str, Any],
-                              filename: str = "statistics.json") -> str:
-        """导出统计数据为JSON"""
-        pass
-    
-    def export_raw_tensors(self,
-                          tensors: Dict[str, Tensor],
-                          filename: str = "tensors.pt") -> str:
-        """导出原始张量数据"""
-        pass
-    
-    def generate_html_report(self,
-                            results: Dict[str, Any],
-                            filename: str = "report.html") -> str:
-        """生成HTML综合报告"""
-        pass
+# 未来扩展占位符
+# class ReportExporter:
+#     """[未来扩展] 自动生成 HTML/PDF 综合分析报告"""
+#     pass

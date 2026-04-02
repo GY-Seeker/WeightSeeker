@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
-from ..core.types import ModelInfo, ModelArchitecture
+from ..core.types import ModelInfo, ModelArchitecture, DetectionResult
 from ..core.exceptions import ArchitectureNotSupportedError
 
 
@@ -22,31 +22,83 @@ class ArchitectureDetector:
     - 标准 Transformer
     - MoE-Transformer
     
+    内置置信度机制：当自动探测对多模态/混合架构置信度较低时，
+    自动打印警告并建议用户通过 override 参数手动确认。
+    
     Attributes:
+        CONFIDENCE_WARNING_THRESHOLD: 置信度警告阈值，低于此值时自动输出警告
         _detected_modules: 缓存检测到的关键模块
     """
+
+    CONFIDENCE_WARNING_THRESHOLD: float = 0.6  # 低于此值弹出警告
 
     def __init__(self) -> None:
         """初始化探测器"""
         self._detected_modules: Dict[str, Any] = {}
 
-    def detect(self, model: nn.Module) -> ModelInfo:
+    def detect(self, model: nn.Module, override: Optional[Dict[str, Any]] = None) -> ModelInfo:
         """
         自动识别模型架构
 
         依次尝试检测ViT、Swin、标准Transformer和MoE架构，
         返回第一个匹配的架构信息。如果都不匹配，抛出异常。
+        内置置信度计算：当探测置信度 < CONFIDENCE_WARNING_THRESHOLD 时自动输出警告。
 
         Args:
             model: PyTorch模型实例
+            override: 手动覆盖字典（可选）。支持键：
+                - "architecture": str 或 ModelArchitecture 枚举值
+                - "num_layers": int
+                - "num_heads": int
+                - "patch_size": int
+                - "hidden_dim": int
+                - "window_size": int（Swin特有）
+                - "num_experts": int（MoE特有）
 
         Returns:
-            ModelInfo: 模型信息对象，包含架构类型、层数、头数等参数
+            ModelInfo: 模型信息对象。如果提供了 override，使用覆盖后的值。
 
         Raises:
             ArchitectureNotSupportedError: 当架构不支持时
         """
-        # 依次尝试各种架构检测
+        # 先进行带置信度的探测
+        detection_result = self.detect_with_confidence(model)
+        
+        # 置信度警告
+        if detection_result.confidence < self.CONFIDENCE_WARNING_THRESHOLD:
+            for warning in detection_result.warnings:
+                print(f"[ArchitectureDetector WARNING] {warning}")
+        
+        model_info = detection_result.model_info
+        
+        # 应用 override 覆盖
+        if override:
+            model_info = self._apply_override(model_info, override)
+        
+        return model_info
+
+    def detect_with_confidence(self, model: nn.Module) -> DetectionResult:
+        """
+        架构探测并返回包含置信度的结果。
+        
+        相比 detect() ，该方法返回包含置信度和警告信息的完整探测结果，
+        适合需要对探测质量进行评估的场景。
+        
+        Args:
+            model: PyTorch模型实例
+        
+        Returns:
+            DetectionResult: 包含 model_info、confidence、warnings 的探测结果。
+        
+        Raises:
+            ArchitectureNotSupportedError: 当架构不支持时
+        """
+        warnings: List[str] = []
+        detected_arch: Optional[ModelArchitecture] = None
+        model_info: Optional[ModelInfo] = None
+        
+        # 尝试每种架构检测，记录所有匹配的架构
+        matched_archs: List[tuple] = []
         detectors = [
             (self._detect_vit, ModelArchitecture.VIT),
             (self._detect_swin, ModelArchitecture.SWIN),
@@ -56,17 +108,154 @@ class ArchitectureDetector:
         
         for detect_method, arch_type in detectors:
             try:
-                model_info = detect_method(model)
-                if model_info is not None:
-                    return model_info
+                info = detect_method(model)
+                if info is not None:
+                    matched_archs.append((arch_type, info))
             except Exception:
                 continue
         
-        # 所有检测都失败
-        raise ArchitectureNotSupportedError(
-            architecture=type(model).__name__,
-            message=f"无法识别的模型架构: {type(model).__name__}"
+        if not matched_archs:
+            raise ArchitectureNotSupportedError(
+                architecture=type(model).__name__,
+                message=f"无法识别的模型架构: {type(model).__name__}"
+            )
+        
+        # 取第一个匹配结果作为主结果
+        detected_arch, model_info = matched_archs[0]
+        
+        # 计算置信度
+        confidence = self._compute_confidence(model, detected_arch, matched_archs)
+        
+        # 为低置信度生成警告
+        if confidence < self.CONFIDENCE_WARNING_THRESHOLD:
+            warnings.append(
+                f"架构探测置信度较低 ({confidence:.2f})，"
+                f"探测到的架构为 {detected_arch.name}。"
+                f"建议使用 override 参数手动确认关键架构参数。"
+            )
+            if len(matched_archs) > 1:
+                arch_names = [a.name for a, _ in matched_archs]
+                warnings.append(
+                    f"检测到多个匹配架构: {arch_names}，"
+                    f"此现象常出现在多模态/混合架构模型中。"
+                )
+        
+        return DetectionResult(
+            model_info=model_info,
+            confidence=confidence,
+            warnings=warnings,
         )
+
+    def _apply_override(self, model_info: ModelInfo, override: Dict[str, Any]) -> ModelInfo:
+        """
+        将 override 字典中的值覆盖到 ModelInfo 对象中。
+        
+        Args:
+            model_info: 原始探测结果
+            override: 用户提供的覆盖字典
+        
+        Returns:
+            ModelInfo: 应用覆盖后的模型信息
+        """
+        # 将 dataclass 转换为字典方便修改
+        from dataclasses import asdict
+        info_dict = asdict(model_info)
+        
+        # 处理 architecture 键：支持 str 或 ModelArchitecture
+        if "architecture" in override:
+            arch_val = override["architecture"]
+            if isinstance(arch_val, str):
+                # 尝试转换为枚举
+                try:
+                    arch_val = ModelArchitecture[arch_val.upper()]
+                except KeyError:
+                    # 找不到则保持原始值
+                    pass
+            info_dict["architecture"] = arch_val
+        
+        # 处理其他数字键
+        for key in ("num_layers", "num_heads", "hidden_dim", "patch_size",
+                    "window_size", "num_experts"):
+            if key in override:
+                info_dict[key] = override[key]
+        
+        return ModelInfo(**info_dict)
+
+    def _compute_confidence(
+        self,
+        model: nn.Module,
+        detected: ModelArchitecture,
+        matched_archs: Optional[List[tuple]] = None,
+    ) -> float:
+        """
+        计算探测结果的置信度。
+        
+        策略：根据匹配特征的数量和歧义模块重叠程度计算置信度。
+        多模态/混合模型通常会导致置信度下降。
+        
+        Args:
+            model: PyTorch模型实例
+            detected: 已探测到的架构类型
+            matched_archs: 所有匹配的架构列表，用于计算歧义度
+        
+        Returns:
+            float: 置信度值 [0.0, 1.0]
+        """
+        if matched_archs is None:
+            matched_archs = []
+        
+        base_confidence = 0.9  # 基础置信度
+        
+        # 多个架构同时匹配时降低置信度
+        if len(matched_archs) > 1:
+            base_confidence -= 0.2 * (len(matched_archs) - 1)
+        
+        # 进一步根据匹配特征数量模拟评估
+        feature_count = 0
+        
+        if detected == ModelArchitecture.VIT:
+            if any(hasattr(m, 'patch_embed') or 'PatchEmbed' in type(m).__name__
+                   for _, m in model.named_modules()):
+                feature_count += 1
+            if hasattr(model, 'cls_token') or any(
+                'cls_token' in n for n, _ in model.named_parameters()):
+                feature_count += 1
+            if hasattr(model, 'blocks') or hasattr(model, 'encoder'):
+                feature_count += 1
+        
+        elif detected == ModelArchitecture.SWIN:
+            if any('WindowAttention' in type(m).__name__ or
+                   'SwinTransformerBlock' in type(m).__name__
+                   for _, m in model.named_modules()):
+                feature_count += 2  # 独特特征，权重较高
+            if hasattr(model, 'layers') or hasattr(model, 'stages'):
+                feature_count += 1
+        
+        elif detected == ModelArchitecture.MOE_TRANSFORMER:
+            if any('MoE' in type(m).__name__ or 'Expert' in type(m).__name__
+                   for _, m in model.named_modules()):
+                feature_count += 1
+            if any('Router' in type(m).__name__ or 'Gate' in type(m).__name__
+                   for _, m in model.named_modules()):
+                feature_count += 1
+            if hasattr(model, 'num_experts'):
+                feature_count += 1
+        
+        elif detected == ModelArchitecture.TRANSFORMER:
+            if any('TransformerEncoder' in type(m).__name__
+                   for _, m in model.named_modules()):
+                feature_count += 1
+            if any(isinstance(m, nn.MultiheadAttention)
+                   for _, m in model.named_modules()):
+                feature_count += 1
+            if hasattr(model, 'd_model') or hasattr(model, 'nhead'):
+                feature_count += 1
+        
+        # 根据特征数量调整置信度（每个特征加 0.05，最多加 0.1）
+        feature_bonus = min(feature_count * 0.05, 0.1)
+        confidence = base_confidence + feature_bonus
+        
+        return max(0.0, min(1.0, confidence))
 
     def _detect_vit(self, model: nn.Module) -> Optional[ModelInfo]:
         """
