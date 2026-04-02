@@ -1,36 +1,24 @@
 """空间重构器 - Patch 粒度转换与上采样
 
 可选模块 — 仅图像输入场景需要。
-
-负责将 Patch 级注意力/梯度向量重塑为与原始图像对应的 2D 空间网格，
-并通过插值方法将 Patch 网格上采样至像素级热力图。
-
-同时支持 Swin Transformer 的窗口注意力重组（窗口 → 全局）。
 """
 
+import math
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from ..core.types import ModelArchitecture
+from ..core.exceptions import InvalidInputError
 
 
 class SpatialReshaper:
-    """空间重构器：负责 Patch 粒度转换与上采样。
+    """空间重构器：Patch 粒度转换与上采样。
 
-    核心职责：
-    1. 将 Patch 级一维向量重塑为二维网格（patch_to_grid）
-    2. 将二维 Patch 网格上采样至原始图像像素尺寸（upsample_to_image）
-    3. 将 Swin 的窗口注意力重组为全局格式（swin_window_reorganize）
-
-    适用架构：
-        - ViT：标准 (num_patches_h, num_patches_w) 网格
-        - Swin Transformer：需要额外的窗口重组处理
-
-    注意：
-        此类假设输入为 2D 图像模型。对于 1D 序列模型（ECG/NLP），
-        应在 pipeline 中设置 skip_spatial=True，跳过此模块。
+    将 Patch 级向量/注意力矩阵重塑为 2D 网格并上采样至原图尺寸。
+    支持 ViT 标准 Patch 网格与 Swin Transformer 多 stage 窗口注意力重组。
     """
 
     def __init__(
@@ -43,17 +31,31 @@ class SpatialReshaper:
         """初始化空间重构器。
 
         Args:
-            patch_size: Patch 大小（像素），例如 16 表示 16×16 的 Patch。
-            image_size: 原始图像尺寸 (H, W)，例如 (224, 224)。
-            architecture: 模型架构类型，用于处理 Swin 等特殊架构的额外逻辑。
-                          默认为 ModelArchitecture.VIT。
-            num_stages: stage 数量（Swin 架构必填，用于各 stage 分辨率适配）。
-                        ViT 等无 stage 的架构可传 None。
+            patch_size: Patch 边长（像素）。
+            image_size: 原始图像尺寸 (H, W)。
+            architecture: 模型架构，Swin 有额外处理逻辑。
+            num_stages: Swin 架构的 stage 数量，非 Swin 可为 None。
 
         Raises:
-            ValueError: 当 architecture=Swin 且 num_stages 未提供时。
+            InvalidInputError: architecture=Swin 且 num_stages 未提供时。
         """
-        raise NotImplementedError("待实现")
+        if architecture == ModelArchitecture.SWIN and num_stages is None:
+            raise InvalidInputError(
+                expected="num_stages != None for Swin architecture",
+                actual="num_stages=None",
+            )
+        self.patch_size = patch_size
+        self.image_size = image_size  # (H, W)
+        self.architecture = architecture
+        self.num_stages = num_stages
+
+        # 基础 Patch 网格尺寸（ViT 场景）
+        self.num_patches_h = image_size[0] // patch_size
+        self.num_patches_w = image_size[1] // patch_size
+
+    # ------------------------------------------------------------------
+    # 公开接口
+    # ------------------------------------------------------------------
 
     def patch_to_grid(
         self,
@@ -63,45 +65,73 @@ class SpatialReshaper:
     ) -> Tensor:
         """将 Patch 级一维向量重塑为二维网格。
 
-        将形状为 (B, num_patches) 或 (num_patches,) 的 Patch 重要性向量，
-        重塑为对应 Patch 空间排列的二维网格形式，以便后续上采样。
-
         Args:
-            patch_vector: Patch 级向量，形状为 (B, num_patches) 或 (num_patches,)。
-            num_patches_h: Patch 网格高度（即垂直方向的 Patch 数量）。
-            num_patches_w: Patch 网格宽度（即水平方向的 Patch 数量）。
+            patch_vector: (B, num_patches) 或 (num_patches,)。
+            num_patches_h: 网格高度。
+            num_patches_w: 网格宽度。
 
         Returns:
-            Tensor: 重塑后的二维网格，形状为
-                    (B, num_patches_h, num_patches_w) 或
-                    (num_patches_h, num_patches_w)。
+            (B, num_patches_h, num_patches_w) 或 (num_patches_h, num_patches_w)。
 
         Raises:
-            ValueError: 当 patch_vector 的元素数量与
-                        num_patches_h * num_patches_w 不匹配时。
+            InvalidInputError: patch 数量与 h*w 不匹配时。
         """
-        raise NotImplementedError("待实现")
+        expected = num_patches_h * num_patches_w
+        has_batch = patch_vector.dim() == 2
+
+        n = patch_vector.shape[-1]
+        if n != expected:
+            raise InvalidInputError(
+                expected=f"num_patches={expected}",
+                actual=f"num_patches={n}",
+            )
+
+        if has_batch:
+            return patch_vector.view(patch_vector.shape[0], num_patches_h, num_patches_w)
+        else:
+            return patch_vector.view(num_patches_h, num_patches_w)
 
     def upsample_to_image(self, grid: Tensor, method: str = "bilinear") -> Tensor:
-        """将 Patch 级二维网格上采样至原始图像像素级尺寸。
-
-        使用指定的插值方法将 Patch 网格 (num_patches_h, num_patches_w)
-        上采样为与原始图像相同分辨率 (image_h, image_w) 的热力图。
+        """将 Patch 级二维网格上采样至原图尺寸。
 
         Args:
-            grid: Patch 级二维网格，形状为 (H, W) 或 (B, H, W)。
-            method: 插值方法，支持：
-                    - "bilinear"：双线性插值（默认，平滑效果好）
-                    - "gaussian"：高斯模糊平滑（边缘更柔和）
+            grid: (H, W) 或 (B, H, W)。
+            method: "bilinear" 或 "gaussian"。
 
         Returns:
-            Tensor: 上采样后的热力图，形状为 (image_h, image_w) 或 (B, image_h, image_w)，
-                    与初始化时传入的 image_size 对应。
+            (image_h, image_w) 或 (B, image_h, image_w)。
 
         Raises:
-            ValueError: 当 method 不在支持列表内时。
+            InvalidInputError: method 不支持时。
         """
-        raise NotImplementedError("待实现")
+        if method not in ("bilinear", "gaussian"):
+            raise InvalidInputError(
+                expected="method in ['bilinear', 'gaussian']",
+                actual=f"method='{method}'",
+            )
+
+        target_h, target_w = self.image_size
+        has_batch = grid.dim() == 3
+
+        # 统一升维为 (B, 1, H, W) 再插值
+        x = grid.unsqueeze(0) if not has_batch else grid
+        x = x.unsqueeze(1).float()  # (B, 1, h, w)
+
+        if method == "bilinear":
+            out = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=True)
+        else:
+            # gaussian: 先双线性上采样，再高斯平滑
+            out = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=True)
+            interpolator = Interpolator()
+            # 对每个 batch 分别平滑
+            out = out.squeeze(1)  # (B, H, W)
+            out = interpolator.gaussian_smooth(out)
+            out = out.unsqueeze(1)
+
+        out = out.squeeze(1)  # (B, H, W)
+        if not has_batch:
+            out = out.squeeze(0)
+        return out
 
     def swin_window_reorganize(
         self,
@@ -112,31 +142,117 @@ class SpatialReshaper:
         window_size: int,
         shift_size: int = 0,
     ) -> Tensor:
-        """将 Swin Transformer 窗口注意力重组为全局格式。
+        """将 Swin 窗口注意力重组为 (feature_h, feature_w) 的全局注意力图。
 
-        Swin Transformer 的注意力在局部窗口内计算，输出格式为
-        (num_windows, window_size^2, window_size^2)。本方法将其重组为
-        以特征图像素为单位的全局注意力图 (feature_h, feature_w)，
-        以便后续上采样到原图尺寸。
-
-        对于带位移的窗口（shift_size > 0），需额外处理循环位移后的
-        Patch 位置映射。
+        每个 Patch 位置的得分取其所属窗口注意力行的均值（query → keys 均值）。
 
         Args:
-            window_attention: 窗口内注意力张量，形状为
-                              (num_windows, window_size^2, window_size^2)。
-            stage_idx: 当前所属 stage 的索引（从 0 开始），
-                       用于查找当前 stage 的分辨率信息。
-            feature_h: 当前 stage 的特征图高度（Patch 数量）。
-            feature_w: 当前 stage 的特征图宽度（Patch 数量）。
-            window_size: 窗口大小（以 Patch 为单位）。
-            shift_size: 窗口循环位移大小（0 表示无位移）。
+            window_attention: (num_windows, window_size^2, window_size^2)。
+            stage_idx: stage 索引（暂留，供多 stage 扩展）。
+            feature_h: 当前 stage 特征图高度（Patch 数）。
+            feature_w: 当前 stage 特征图宽度（Patch 数）。
+            window_size: 窗口大小（Patch 单位）。
+            shift_size: 循环位移大小，0 表示不位移。
 
         Returns:
-            Tensor: 全局注意力图，形状为 (feature_h, feature_w)，
-                    每个位置的值为该 Patch 在所有窗口注意力中的聚合得分。
+            (feature_h, feature_w) 的全局注意力图。
 
         Raises:
-            ValueError: 当 feature_h 或 feature_w 不能被 window_size 整除时。
+            InvalidInputError: feature_h 或 feature_w 不能被 window_size 整除时。
         """
-        raise NotImplementedError("待实现")
+        if feature_h % window_size != 0 or feature_w % window_size != 0:
+            raise InvalidInputError(
+                expected=f"feature_h,w divisible by window_size={window_size}",
+                actual=f"feature_h={feature_h}, feature_w={feature_w}",
+            )
+
+        num_win_h = feature_h // window_size
+        num_win_w = feature_w // window_size
+        ws2 = window_size * window_size
+
+        # window_attention: (num_windows, ws2, ws2)
+        # 每个 query token 对所有 key 的注意力均值 → (num_windows, ws2)
+        attn_score = window_attention.mean(dim=-1)  # (num_windows, ws2)
+
+        # 重排为 (num_win_h, num_win_w, window_size, window_size)
+        attn_score = attn_score.view(num_win_h, num_win_w, window_size, window_size)
+
+        # 拼接回 (feature_h, feature_w)
+        global_map = attn_score.permute(0, 2, 1, 3).contiguous()
+        global_map = global_map.view(feature_h, feature_w)
+
+        # 若有循环位移，逆位移还原原始坐标
+        if shift_size > 0:
+            global_map = torch.roll(global_map, shifts=(shift_size, shift_size), dims=(0, 1))
+
+        return global_map
+
+    # ------------------------------------------------------------------
+    # 针对注意力矩阵的高阶接口（用户需求扩展）
+    # ------------------------------------------------------------------
+
+    def reshape_attention(self, attention: Tensor, layer_idx: int = 0) -> Tensor:
+        """将 (B, H, N, N) 注意力矩阵重构为 2D Patch 网格。
+
+        Args:
+            attention: (B, num_heads, N, N)，N 可含 CLS token。
+            layer_idx: 层索引，Swin 用于确定当前 stage 分辨率。
+
+        Returns:
+            (B, num_heads, num_patches_h, num_patches_w)。
+        """
+        attention = self._handle_cls_token(attention)
+        B, H, N, _ = attention.shape
+        side = int(math.isqrt(N))
+        if side * side != N:
+            raise InvalidInputError(
+                expected="N is a perfect square",
+                actual=f"N={N}",
+            )
+
+        # 对每个 query 取其对所有 key 的注意力均值 → (B, H, N)
+        attn_mean = attention.mean(dim=-2)  # (B, H, N)
+        # reshape 为 2D 网格
+        return attn_mean.view(B, H, side, side)
+
+    def reshape_gradient(self, gradient: Tensor) -> Tensor:
+        """将梯度重塑为 2D 空间图并取 L2 范数。
+
+        Args:
+            gradient: (B, N, D) Patch 级梯度，或 (B, C, H, W) 图像级梯度。
+
+        Returns:
+            (B, num_patches_h, num_patches_w) 或 (B, H, W)。
+        """
+        if gradient.dim() == 3:
+            # (B, N, D) → (B, num_patches_h, num_patches_w, D) → L2 → (B, h, w)
+            B, N, D = gradient.shape
+            side = int(math.isqrt(N))
+            grid = gradient.view(B, side, side, D)
+            return grid.norm(dim=-1)
+        elif gradient.dim() == 4:
+            # (B, C, H, W) → L2 over C → (B, H, W)
+            return gradient.norm(dim=1)
+        else:
+            raise InvalidInputError(
+                expected="gradient.dim() in [3, 4]",
+                actual=f"dim={gradient.dim()}",
+            )
+
+    def _handle_cls_token(self, attention: Tensor) -> Tensor:
+        """检测并移除 CLS token（若存在）。
+
+        若 N == num_patches_h * num_patches_w + 1，则去掉第 0 个 token。
+
+        Args:
+            attention: (B, H, N, N)。
+
+        Returns:
+            去除 CLS token 后的 (B, H, N', N')。
+        """
+        expected = self.num_patches_h * self.num_patches_w
+        N = attention.shape[-1]
+        if N == expected + 1:
+            # 去掉第 0 行和第 0 列
+            attention = attention[:, :, 1:, 1:]
+        return attention

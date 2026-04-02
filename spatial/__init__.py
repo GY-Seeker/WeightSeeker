@@ -22,8 +22,14 @@ from .reshaper import SpatialReshaper
 from .normalizer import Normalizer
 from .interpolator import Interpolator
 
+# 别名，与需求文档保持一致
+SpatialNormalizer = Normalizer
+SpatialInterpolator = Interpolator
+
 __all__ = [
     "SpatialReshaper",
     "Normalizer",
     "Interpolator",
+    "SpatialNormalizer",
+    "SpatialInterpolator",
 ]

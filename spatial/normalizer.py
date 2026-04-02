@@ -1,38 +1,21 @@
 """尺度对齐器 - 数值归一化
 
 可选模块 — 仅图像输入场景需要。
-
-提供多种归一化方法，用于将注意力图、梯度图等统一到同一数值尺度，
-以便跨层比较和可视化输出。
-
-核心流程（可视化前归一化）：
-    1. 百分位裁剪（percentile_clip）：去除极端异常值
-    2. Min-Max 归一化（min_max_normalize）：映射至 [0, 1]
 """
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
+
+from ..core.exceptions import InvalidInputError
 
 
 class Normalizer:
-    """尺度对齐器：提供百分位裁剪和多种归一化方法。
+    """尺度对齐器：百分位裁剪与多种归一化方法。
 
-    本类用于将不同层、不同类型的数值（注意力权重、梯度幅值等）
-    统一到可比较的尺度范围，以便：
-    1. 跨层叠加时避免某一层数值过大主导结果
-    2. 可视化前将数值映射到 [0, 1] 区间
-
-    主要方法：
-        - percentile_clip：根据百分位阈值去除极端值
-        - min_max_normalize：线性映射到目标值域
-        - normalize_for_visualization：串联裁剪 + Min-Max 的完整归一化流程
-        - z_score_normalize：零均值单位方差标准化
-
-    注意：
-        本类为无状态工具类，但支持实例化以共享裁剪参数配置。
-        对于函数式调用，可参考 :func:`analyzer.fusion_utils.normalize_for_fusion`。
+    将注意力图、梯度图等统一到 [0, 1] 数值尺度，用于可视化和跨层比较。
     """
 
     def __init__(
@@ -43,80 +26,169 @@ class Normalizer:
         """初始化尺度对齐器。
 
         Args:
-            low_percentile: 下百分位裁剪点，低于此分位的值将被裁剪为该分位值。
-                            默认 0.01（即 1% 分位）。取值范围 [0, 1)。
-            high_percentile: 上百分位裁剪点，高于此分位的值将被裁剪为该分位值。
-                             默认 0.99（即 99% 分位）。取值范围 (0, 1]。
+            low_percentile: 下百分位裁剪点，范围 [0, 1)。
+            high_percentile: 上百分位裁剪点，范围 (0, 1]。
 
         Raises:
-            ValueError: 当 low_percentile >= high_percentile 时。
+            InvalidInputError: low_percentile >= high_percentile 时。
         """
-        raise NotImplementedError("待实现")
+        if low_percentile >= high_percentile:
+            raise InvalidInputError(
+                expected="low_percentile < high_percentile",
+                actual=f"low={low_percentile}, high={high_percentile}",
+            )
+        self.low_percentile = low_percentile
+        self.high_percentile = high_percentile
+
+    # ------------------------------------------------------------------
+    # 核心方法
+    # ------------------------------------------------------------------
 
     def percentile_clip(self, tensor: Tensor) -> Tensor:
-        """根据百分位阈值裁剪张量，去除极端异常值。
-
-        使用初始化时设定的 low_percentile 和 high_percentile 计算分位数，
-        并将超出范围的值 clamp 至对应分位数。
+        """按初始化的百分位阈值裁剪张量，去除极端值。
 
         Args:
             tensor: 任意形状的输入张量。
 
         Returns:
-            Tensor: 裁剪后的张量，形状与输入相同，极端值已被截断。
+            裁剪后的张量，形状与输入相同。
         """
-        raise NotImplementedError("待实现")
+        flat = tensor.float().flatten()
+        low_val = torch.quantile(flat, self.low_percentile)
+        high_val = torch.quantile(flat, self.high_percentile)
+        return tensor.float().clamp(min=low_val.item(), max=high_val.item())
 
     def min_max_normalize(
         self,
         tensor: Tensor,
         target_range: Tuple[float, float] = (0.0, 1.0),
     ) -> Tensor:
-        """将张量线性映射至目标值域（Min-Max 归一化）。
-
-        将 tensor 的最小值映射到 target_range[0]，最大值映射到 target_range[1]。
-        若张量为常数（max == min），返回全零张量。
+        """Min-Max 线性归一化到目标值域。
 
         Args:
             tensor: 任意形状的输入张量。
-            target_range: 目标值域 (min_val, max_val)，默认 (0.0, 1.0)。
+            target_range: 目标值域 (min_val, max_val)。
 
         Returns:
-            Tensor: 归一化后的张量，值域在 target_range 内，形状与输入相同。
+            归一化后的张量，值域在 target_range 内。
 
         Raises:
-            ValueError: 当 target_range[0] >= target_range[1] 时。
+            InvalidInputError: target_range[0] >= target_range[1] 时。
         """
-        raise NotImplementedError("待实现")
+        if target_range[0] >= target_range[1]:
+            raise InvalidInputError(
+                expected="target_range[0] < target_range[1]",
+                actual=f"target_range={target_range}",
+            )
+        x = tensor.float()
+        t_min = x.min()
+        t_max = x.max()
+        if t_max == t_min:
+            return torch.zeros_like(x)
+        normalized = (x - t_min) / (t_max - t_min)
+        low, high = target_range
+        return normalized * (high - low) + low
 
     def normalize_for_visualization(self, tensor: Tensor) -> Tensor:
-        """完整的可视化前归一化流程：百分位裁剪 + Min-Max 映射到 [0, 1]。
-
-        串联调用 percentile_clip 和 min_max_normalize，
-        为热力图渲染提供标准化的 [0, 1] 输出。
-
-        流程：
-            原始张量 → percentile_clip → min_max_normalize([0, 1]) → 输出
+        """完整可视化归一化：百分位裁剪 + Min-Max 映射到 [0, 1]。
 
         Args:
-            tensor: 原始注意力或梯度张量（任意形状）。
+            tensor: 原始注意力或梯度张量。
 
         Returns:
-            Tensor: 归一化后的张量，值域 [0, 1]，形状与输入相同。
+            值域 [0, 1] 的归一化张量。
         """
-        raise NotImplementedError("待实现")
+        clipped = self.percentile_clip(tensor)
+        return self.min_max_normalize(clipped, target_range=(0.0, 1.0))
 
     def z_score_normalize(self, tensor: Tensor) -> Tensor:
-        """Z-Score 标准化：将张量变换为零均值、单位方差。
-
-        公式：(tensor - mean) / (std + eps)
-
-        适用于需要保留相对大小关系但不关心绝对量纲的场景。
+        """Z-Score 标准化：(x - mean) / (std + eps)。
 
         Args:
             tensor: 任意形状的输入张量。
 
         Returns:
-            Tensor: 标准化后的张量，均值接近 0、标准差接近 1，形状与输入相同。
+            零均值、单位方差的标准化张量。
         """
-        raise NotImplementedError("待实现")
+        x = tensor.float()
+        mean = x.mean()
+        std = x.std()
+        return (x - mean) / (std + 1e-8)
+
+    # ------------------------------------------------------------------
+    # 高阶接口（用户需求扩展）
+    # ------------------------------------------------------------------
+
+    def normalize(self, tensor: Tensor, method: str = "minmax") -> Tensor:
+        """通用归一化接口，按 method 选择方式。
+
+        Args:
+            tensor: 输入张量。
+            method: "minmax"、"percentile"、"sigmoid" 或 "softmax"。
+
+        Returns:
+            归一化后的张量，值域 [0, 1]。
+        """
+        if method == "minmax":
+            return self.min_max_normalize(tensor)
+        elif method == "percentile":
+            return self.normalize_for_visualization(tensor)
+        elif method == "sigmoid":
+            return torch.sigmoid(tensor.float())
+        elif method == "softmax":
+            # 在最后两个维度上做 softmax
+            x = tensor.float()
+            shape = x.shape
+            x_flat = x.view(*shape[:-2], -1)
+            out = F.softmax(x_flat, dim=-1)
+            return out.view(shape)
+        else:
+            raise InvalidInputError(
+                expected="method in ['minmax', 'percentile', 'sigmoid', 'softmax']",
+                actual=f"method='{method}'",
+            )
+
+    def normalize_attention(self, attention: Tensor) -> Tensor:
+        """对每个注意力头独立做 Min-Max 归一化。
+
+        Args:
+            attention: (B, num_heads, h, w)。
+
+        Returns:
+            (B, num_heads, h, w)，每个头独立归一化到 [0, 1]。
+        """
+        B, H, h, w = attention.shape
+        out = torch.zeros_like(attention.float())
+        for b in range(B):
+            for head in range(H):
+                out[b, head] = self.min_max_normalize(attention[b, head])
+        return out
+
+    def normalize_gradient(self, gradient: Tensor) -> Tensor:
+        """对每个样本独立做 Min-Max 归一化。
+
+        Args:
+            gradient: (B, h, w)。
+
+        Returns:
+            (B, h, w)，每个样本独立归一化到 [0, 1]。
+        """
+        B = gradient.shape[0]
+        out = torch.zeros_like(gradient.float())
+        for b in range(B):
+            out[b] = self.min_max_normalize(gradient[b])
+        return out
+
+    def clip_outliers(self, tensor: Tensor, percentile: float = 99.0) -> Tensor:
+        """将超过指定百分位的值截断。
+
+        Args:
+            tensor: 任意形状的输入张量。
+            percentile: 截断百分位，如 99 表示在 99% 处截断。
+
+        Returns:
+            截断后的张量。
+        """
+        q = percentile / 100.0
+        threshold = torch.quantile(tensor.float().flatten(), q)
+        return tensor.float().clamp(max=threshold.item())
