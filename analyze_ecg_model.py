@@ -284,7 +284,6 @@ def main():
         logger.info("  3. 多层对比：multi_layer_attention_seq.png")
         logger.info("     - 对比不同 Transformer 层的关注模式")
         logger.info("     - 浅层关注低层次特征，深层关注高层次模式")
-        logger.info("\n💡 提示：这些图表适用于任何 1D 时序数据（ECG/NLP/金融等）")
         
         # 清理资源
         pipeline.cleanup()
