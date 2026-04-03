@@ -203,10 +203,6 @@ def plot_accumulator_stats(
                                   rotation=45 if len(layers) > 10 else 0,
                                   fontsize=8)
         ax_right.grid(axis="y", linestyle="--", alpha=0.5)
-        # 添加数值标签
-        for i, v in enumerate(grad_norm):
-            ax_right.annotate(f'{v:.3f}', (i, v), textcoords="offset points",
-                            xytext=(0, 5), ha='center', fontsize=7)
     else:
         ax_right.text(0.5, 0.5, "No data", ha="center", va="center")
         ax_right.set_title("Layer Gradient Norm", fontsize=10)

@@ -95,6 +95,25 @@ def compute_token_importance(
         attn = attn_diagonals[layer_idx]  # (B, L)
         grad = hidden_gradients[layer_idx]  # (B, L)
         
+        # 【维度对齐】检查并修正可能的维度颠倒
+        if grad.dim() == 2 and attn.dim() == 2:
+            if grad.shape == attn.shape:
+                pass  # 形状一致，无需调整
+            elif grad.shape == (attn.shape[1], attn.shape[0]):
+                # 维度颠倒了：(L, B) -> (B, L)
+                grad = grad.T  # 转置修正
+            elif grad.shape[0] == attn.shape[0] and grad.shape[1] == 1 and attn.shape[1] > 1:
+                # (B, 1) vs (B, L)：扩展梯度
+                grad = grad.expand_as(attn)
+            elif grad.shape[1] == attn.shape[1] and grad.shape[0] == 1 and attn.shape[0] > 1:
+                # (1, L) vs (B, L)：扩展梯度
+                grad = grad.expand_as(attn)
+            else:
+                # 无法自动对齐，抛出异常让上层处理
+                raise ValueError(f"形状不一致且无法自动对齐：{attn.shape} vs {grad.shape}")
+        elif grad.shape != attn.shape:
+            raise ValueError(f"形状不一致：{attn.shape} vs {grad.shape}")
+        
         # 归一化到 [0, 1]
         attn_norm = normalize_for_fusion(attn)
         grad_norm = normalize_for_fusion(grad)

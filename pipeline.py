@@ -250,7 +250,12 @@ class AnalysisPipeline:
         if not self.config.skip_spatial:
             from .spatial.reshaper import SpatialReshaper
             from .spatial.normalizer import Normalizer
-            patch_size = max(self._model_info.patch_size, 1)
+            # 处理 patch_size 可能是 tuple 的情况
+            patch_size_raw = self._model_info.patch_size
+            if isinstance(patch_size_raw, tuple):
+                patch_size = max(patch_size_raw)  # 取最大值
+            else:
+                patch_size = max(patch_size_raw, 1)
             image_size = (224, 224)  # 默认图像尺寸
             num_stages = None
             if self._model_info.architecture == ModelArchitecture.SWIN:
@@ -262,6 +267,9 @@ class AnalysisPipeline:
                 num_stages=num_stages,
             )
             self._normalizer = Normalizer()
+            
+            # 保存 patch_size 用于后续可视化
+            self._patch_size = patch_size
 
         # 8. 初始化可视化（骨架，暂时跳过未实现部分）
         if not self.config.skip_visualization and self.config.save_visualizations:
@@ -271,6 +279,16 @@ class AnalysisPipeline:
             except NotImplementedError:
                 logger.warning("HeatmapRenderer 尚未实现，跳过可视化初始化")
                 self._heatmap_renderer = None
+            
+            # 初始化 ImageVisualizer（图像模型专用）
+            # 注意：即使 skip_spatial=True，如果是 4D 图像数据也需要 ImageVisualizer
+            try:
+                from .visualization.image_visualizer import ImageVisualizer
+                self._image_visualizer = ImageVisualizer()
+                logger.info("ImageVisualizer 初始化成功（图像模型可视化）")
+            except Exception as e:
+                logger.warning("ImageVisualizer 初始化失败：%s", e)
+                self._image_visualizer = None
 
         self._initialized = True
         logger.info("AnalysisPipeline 组件初始化完成")
@@ -316,6 +334,8 @@ class AnalysisPipeline:
             results["gradient_maps"] = gradient_maps
         except Exception as e:
             logger.error("反向阶段失败：%s", e)
+            import traceback
+            traceback.print_exc()
             gradient_maps = {"input": None, "hidden": {}, "attention": {}}
             results["gradient_maps"] = gradient_maps
 
@@ -448,6 +468,12 @@ class AnalysisPipeline:
             model=self._model,
             input_data=input_data,
         )
+        
+        # 保存输出数据用于图像质量对比
+        if not self.config.skip_spatial:  # 图像模型
+            output = forward_result["output"]
+            self._last_output_data = output.detach().cpu()
+        
         return {
             "attention_maps": forward_result["attention"],
             "hidden_states": forward_result["hidden_state"],
@@ -585,23 +611,6 @@ class AnalysisPipeline:
                     )
                     saved_paths["all_heads_heatmap"] = all_heads_path
                     logger.info("已生成所有头的热力图：%s", all_heads_path)
-                
-                # ❌【已弃用】传统的单头热力图（无实际意义）
-                # attn_path = os.path.join(output_dir, "attention_heatmap.png")
-                # if attention_maps:
-                #     first_attn = next(iter(attention_maps.values()))
-                #     # 取第一个 batch、第一个 head
-                #     if first_attn.dim() == 4:
-                #         render_attn = first_attn[0, 0]
-                #     elif first_attn.dim() == 3:
-                #         render_attn = first_attn[0]
-                #     else:
-                #         render_attn = first_attn
-                #     self._heatmap_renderer.render_attention(
-                #         render_attn, title="Attention Heatmap (Layer 0, Head 0)", save_path=attn_path
-                #     )
-                #     saved_paths["attention_heatmap"] = attn_path
-                #     logger.info("已生成单头热力图：%s", attn_path)
                     
                 # 3. 多层对比面板
                 if len(attention_maps) > 1:
@@ -618,8 +627,292 @@ class AnalysisPipeline:
             except Exception as e:
                 logger.error("热力图渲染失败：%s", e)
 
+        # ========== 新增：图像模型专用可视化 ==========
+        # 图像模型路径：有 ImageVisualizer 且输入是 4D 图像数据
+        is_image_data = False
+        if hasattr(self, '_last_input_data'):
+            is_image_data = self._last_input_data.dim() == 4  # (B, C, H, W)
+            logger.info(f"  图像模型检测：_last_input_data.dim()={self._last_input_data.dim()}, is_image_data={is_image_data}")
+        else:
+            logger.warning("  _last_input_data 未设置")
+        
+        logger.info(f"  图像模型可视化条件: skip_spatial={self.config.skip_spatial}, is_image_data={is_image_data}, has_visualizer={self._image_visualizer is not None}")
+        
+        if (not self.config.skip_spatial or is_image_data) and self._image_visualizer is not None:  # 图像模型
+            try:
+                from .visualization.image_visualizer import compute_psnr, compute_ssim
+                
+                logger.info("开始图像模型专用可视化...")
+                
+                # 1. Patch 划分可视化
+                if hasattr(self, '_last_input_data'):
+                    input_data_vis = self._last_input_data
+                    if input_data_vis.dim() == 4:  # (B, C, H, W)
+                        input_data_vis = input_data_vis[0]  # 取第一个样本
+                    
+                    patch_viz_path = os.path.join(output_dir, "patch_visualization.png")
+                    # 从模型信息或配置中获取 patch_size
+                    patch_size = getattr(self, '_patch_size', 16)  # 默认 16
+                    
+                    # 计算 token_importance（如果还没计算）
+                    token_importance_for_viz = None
+                    
+                    # 从 results 中获取梯度
+                    gradient_maps = results.get("gradient_maps", {})
+                    hidden_gradients = gradient_maps.get('hidden', {})
+                    
+                    logger.info(f"  Patch可视化：检查数据 - attention_maps={len(attention_maps)}层, hidden_gradients={len(hidden_gradients)}层")
+                    
+                    if attention_maps and hidden_gradients:
+                        try:
+                            from .analyzer.fusion_utils import compute_token_importance
+                            
+                            # 检查是否有完整的 (B, L) 梯度
+                            has_complete_gradients = False
+                            for layer_idx, grad in hidden_gradients.items():
+                                logger.info(f"    Layer {layer_idx} 梯度形状: {grad.shape}, 维度: {grad.dim()}")
+                                if grad.dim() == 2:
+                                    has_complete_gradients = True
+                                    break
+                            
+                            if has_complete_gradients:
+                                logger.info("  开始计算 token_importance...")
+                                try:
+                                    token_importance_for_viz = compute_token_importance(
+                                        attention_maps=attention_maps,
+                                        hidden_gradients=hidden_gradients,
+                                        method='gradcam',
+                                    )  # (B, L)
+                                    logger.info(f"  ✓ token_importance 计算成功，形状: {token_importance_for_viz.shape}")
+                                except ValueError as e:
+                                    # 形状不匹配（如窗口注意力 vs 标准注意力）
+                                    logger.warning(f"  Grad-CAM 融合失败（{e}），使用纯注意力对角线")
+                                    token_importance_for_viz = None
+                            
+                            # Fallback: 使用纯注意力对角线
+                            if token_importance_for_viz is None:
+                                logger.info("  使用纯注意力对角线作为重要性得分")
+                                diagonals_per_layer = []
+                                for layer_idx, attn in attention_maps.items():
+                                    if attn.dim() == 4:  # (B, H, L, L) 或 (num_windows*B, H, ws², ws²)
+                                        # 对于窗口注意力 [256, 1, 1, 96]，需要对所有维度取平均
+                                        if attn.shape[0] > 100:  # 假设这是窗口注意力
+                                            # 窗口注意力：对所有维度取平均得到每个窗口的分数
+                                            diag = attn.mean(dim=[1, 2, 3])  # (num_windows,)
+                                            diagonals_per_layer.append(diag.unsqueeze(0))  # (1, num_windows)
+                                        else:
+                                            # 标准注意力：取对角线
+                                            B, H, L, _ = attn.shape
+                                            diagonal = attn[:, :, range(L), range(L)].mean(dim=1)
+                                            diagonals_per_layer.append(diagonal)
+                                    elif attn.dim() == 3:  # (B, L, L)
+                                        B, L, _ = attn.shape
+                                        diagonal = attn[:, range(L), range(L)]
+                                        diagonals_per_layer.append(diagonal)
+                                
+                                if diagonals_per_layer:
+                                    stacked = torch.stack(diagonals_per_layer, dim=0)  # (num_layers, B, L)
+                                    token_importance_for_viz = stacked.mean(dim=0)  # (B, L)
+                                    from .analyzer.fusion_utils import normalize_for_fusion
+                                    token_importance_for_viz = normalize_for_fusion(token_importance_for_viz)
+                                    logger.info(f"  ✓ 纯注意力对角线，形状: {token_importance_for_viz.shape}")
+                        except Exception as e:
+                            logger.error(f"  ✗ 计算 token_importance 失败：{e}")
+                            import traceback
+                            traceback.print_exc()
+                    else:
+                        if not attention_maps:
+                            logger.warning("  attention_maps 为空")
+                        if not hidden_gradients:
+                            logger.warning("  hidden_gradients 为空")
+                    
+                    logger.info(f"  最终 token_importance_for_viz: {token_importance_for_viz is not None}")
+                    if token_importance_for_viz is not None:
+                        logger.info(f"    形状: {token_importance_for_viz.shape}")
+                    
+                    self._image_visualizer.visualize_patches(
+                        input_data_vis,
+                        patch_size=patch_size,
+                        token_importance=token_importance_for_viz,
+                        save_path=patch_viz_path
+                    )
+                    saved_paths["patch_visualization"] = patch_viz_path
+                    logger.info("已生成 Patch 可视化：%s", patch_viz_path)
+                
+                # 2. 图像质量对比（原图 vs 输出）
+                if hasattr(self, '_last_input_data') and hasattr(self, '_last_output_data'):
+                    original = self._last_input_data
+                    reconstructed = self._last_output_data
+                    
+                    if original.dim() == 4:
+                        original = original[0]
+                    if reconstructed.dim() == 4:
+                        reconstructed = reconstructed[0]
+                    
+                    # 计算质量指标
+                    psnr = compute_psnr(original, reconstructed)
+                    ssim = compute_ssim(original, reconstructed)
+                    logger.info(f"  图像质量指标 - PSNR: {psnr:.2f} dB, SSIM: {ssim:.4f}")
+                    
+                    comparison_path = os.path.join(output_dir, "image_quality_comparison.png")
+                    metrics = {'PSNR': psnr, 'SSIM': ssim}
+                    self._image_visualizer.visualize_image_comparison(
+                        original, reconstructed,
+                        metrics=metrics,
+                        save_path=comparison_path
+                    )
+                    saved_paths["image_quality_comparison"] = comparison_path
+                    logger.info("已生成图像质量对比：%s", comparison_path)
+                
+                # 3. 注意力叠加到原始图像
+                if attention_maps and hasattr(self, '_last_input_data'):
+                    try:
+                        input_data_vis = self._last_input_data
+                        if input_data_vis.dim() == 4:
+                            input_data_vis = input_data_vis[0]
+                        
+                        # 取第一层注意力
+                        first_layer = min(attention_maps.keys())
+                        attn = attention_maps[first_layer]
+                        
+                        # 处理注意力图：(B, H, L, L) → (H, W)
+                        attn_2d = None
+                        if attn.dim() == 4:  # (B, H, L, L)
+                            # 对 batch 和 heads 取平均
+                            attn_2d = attn[0].mean(dim=0)  # (L, L)
+                            # 如果 L 是 token 数，需要 reshape 到 2D
+                            L = attn_2d.shape[0]
+                            sqrt_L = int(L ** 0.5)
+                            if sqrt_L * sqrt_L == L:
+                                attn_2d = attn_2d.view(sqrt_L, sqrt_L)
+                            else:
+                                # 如果不是方形，使用原始注意力矩阵的一个切片
+                                logger.warning(f"  注意力图不是方形 ({L})，使用第一行作为 1D 注意力")
+                                attn_2d = attn_2d[0]  # 取第一行 (L,)
+                        elif attn.dim() == 3:  # (B, L, L)
+                            attn_2d = attn[0].mean(dim=0)
+                            L = attn_2d.shape[0]
+                            sqrt_L = int(L ** 0.5)
+                            if sqrt_L * sqrt_L == L:
+                                attn_2d = attn_2d.view(sqrt_L, sqrt_L)
+                            else:
+                                attn_2d = attn_2d[0]
+                        else:
+                            attn_2d = attn
+                        
+                        if attn_2d is not None:
+                            overlay_path = os.path.join(output_dir, "attention_overlay_on_image.png")
+                            self._image_visualizer.overlay_attention_on_image(
+                                attn_2d,
+                                input_data_vis,
+                                alpha=0.5,
+                                save_path=overlay_path
+                            )
+                            saved_paths["attention_overlay"] = overlay_path
+                            logger.info("已生成注意力叠加图：%s", overlay_path)
+                    except Exception as e:
+                        logger.warning(f"  注意力叠加生成失败：{e}，跳过")
+                
+                # 4. 多层注意力对比（仅适用于标准注意力，窗口注意力不适合此可视化）
+                if len(attention_maps) > 1:
+                    # 处理多层注意力
+                    processed_attention = {}
+                    for layer_idx, attn in attention_maps.items():
+                        if attn.dim() == 4:  # (B, H, L, L) 或 (num_windows, H, ws, ws)
+                            # 检测是否是窗口注意力
+                            if attn.shape[0] > 100:  # 窗口注意力，跳过
+                                continue
+                            else:
+                                # 标准注意力：对 batch 和 heads 取平均
+                                attn_proc = attn.mean(dim=[0, 1])
+                                # 尝试 reshape 到 2D
+                                L = attn_proc.shape[0]
+                                sqrt_L = int(L ** 0.5)
+                                if sqrt_L * sqrt_L == L:
+                                    attn_proc = attn_proc.view(sqrt_L, sqrt_L)
+                                processed_attention[layer_idx] = attn_proc
+                        elif attn.dim() == 3:  # (B, L, L)
+                            attn_proc = attn.mean(dim=0)
+                            L = attn_proc.shape[0]
+                            sqrt_L = int(L ** 0.5)
+                            if sqrt_L * sqrt_L == L:
+                                attn_proc = attn_proc.view(sqrt_L, sqrt_L)
+                            processed_attention[layer_idx] = attn_proc
+                        else:
+                            processed_attention[layer_idx] = attn
+                    
+                    # 只有有有效的层才生成多层对比图
+                    if processed_attention:
+                        multi_layer_path = os.path.join(output_dir, "multi_layer_attention_image.png")
+                        self._image_visualizer.visualize_multi_layer_attention(
+                            processed_attention,
+                            num_cols=4,
+                            save_path=multi_layer_path
+                        )
+                        saved_paths["multi_layer_attention_image"] = multi_layer_path
+                        logger.info("已生成多层注意力对比（图像）：%s", multi_layer_path)
+                    else:
+                        logger.info("  所有层都是窗口注意力，跳过多层对比可视化")
+                
+                # 5. 梯度热力图叠加
+                gradient_maps = results.get("gradient_maps", {})
+                hidden_gradients = gradient_maps.get('hidden', {})
+                
+                if hidden_gradients and hasattr(self, '_last_input_data'):
+                    input_data_vis = self._last_input_data
+                    if input_data_vis.dim() == 4:
+                        input_data_vis = input_data_vis[0]
+                    
+                    # 取第一层梯度
+                    first_grad_layer = min(hidden_gradients.keys())
+                    grad = hidden_gradients[first_grad_layer]
+                    
+                    # 处理梯度：(B, C, H, W) 或 (B, L)
+                    if grad.dim() == 4:  # (B, C, H, W)
+                        grad_2d = grad[0].mean(dim=0)  # 对通道取平均 (H, W)
+                    elif grad.dim() == 2:  # (B, L)
+                        # 检测是否是窗口注意力
+                        if grad.shape[0] > 100:  # 窗口注意力，跳过
+                            logger.info("  梯度是窗口注意力格式，跳过梯度叠加可视化")
+                            grad_2d = None
+                        else:
+                            grad_1d = grad[0]
+                            L = grad_1d.shape[0]
+                            sqrt_L = int(L ** 0.5)
+                            if sqrt_L * sqrt_L == L:
+                                grad_2d = grad_1d.view(sqrt_L, sqrt_L)
+                            else:
+                                grad_2d = None
+                    else:
+                        grad_2d = None
+                    
+                    if grad_2d is not None:
+                        grad_overlay_path = os.path.join(output_dir, "gradient_overlay_on_image.png")
+                        self._image_visualizer.overlay_attention_on_image(
+                            grad_2d,
+                            input_data_vis,
+                            alpha=0.5,
+                            save_path=grad_overlay_path
+                        )
+                        saved_paths["gradient_overlay"] = grad_overlay_path
+                        logger.info("已生成梯度叠加图：%s", grad_overlay_path)
+                
+            except Exception as e:
+                logger.error("图像模型专用可视化失败：%s", e)
+                import traceback
+                traceback.print_exc()
+        
         # ========== 新增：时序数据融合可视化 ==========
-        if self.config.skip_spatial:  # ECG/NLP/时序模型
+        # 注意：skip_spatial=True 可能是 ECG/NLP 时序模型，也可能是图像模型（如 SwinIR）
+        # 需要通过输入数据维度来区分：4D (B,C,H,W) 是图像，2D/3D (B,L) 或 (B,C,L) 是时序
+        is_timeseries_data = False
+        if hasattr(self, '_last_input_data'):
+            input_dim = self._last_input_data.dim()
+            # 图像数据：4D (B, C, H, W)
+            # 时序数据：2D (C, L) 或 3D (B, C, L)
+            is_timeseries_data = input_dim in [2, 3]
+        
+        if self.config.skip_spatial and is_timeseries_data:  # 仅处理真正的时序数据
             try:
                 from .analyzer.fusion_utils import compute_token_importance
                 from .visualization.timeseries_visualizer import TimeSeriesVisualizer
@@ -807,8 +1100,16 @@ class AnalysisPipeline:
                     attn = attention_maps[first_layer]
                     grad = hidden_states.get(first_layer, attn)
                     
-                    # 如果是序列数据，将注意力图视为 1D 空间
-                    if self.config.skip_spatial:
+                    # 判断数据类型：通过输入数据维度区分图像和序列
+                    is_image_data = False
+                    if hasattr(self, '_last_input_data'):
+                        is_image_data = self._last_input_data.dim() == 4  # (B, C, H, W)
+                    
+                    # 序列数据：2D/3D 输入，使用 1D 四象限分析
+                    # 图像数据：4D 输入，使用 2D 四象限分析
+                    is_sequence_data = not is_image_data and self.config.skip_spatial
+                    
+                    if is_sequence_data:
                         # 1D 序列模型：使用平均注意力图 (B, L)
                         logger.info("生成序列数据的四象限分析...")
                         # 从 (B, H, L, L) 提取对角线作为 1D 注意力分布
@@ -865,10 +1166,95 @@ class AnalysisPipeline:
                         # 图像模型：正常的 2D 四象限
                         logger.info("生成图像数据的四象限分析...")
                         
+                        # 调试：输出注意力矩阵的实际形状
+                        logger.info(f"  注意力矩阵形状: {attn.shape}, 维度: {attn.dim()}")
+                        logger.info(f"  梯度矩阵形状: {grad.shape}, 维度: {grad.dim()}")
+                        
+                        # 检查注意力矩阵是否为标准的 (B, H, L, L) 格式
+                        # SwinIR 的窗口注意力可能是 (num_windows*B, H, ws², ws²) 格式
+                        # 需要特殊处理
+                        attn_2d = None
+                        grad_2d = None
+                        
+                        if attn.dim() == 4:
+                            B_dim, H_dim, L_dim1, L_dim2 = attn.shape
+                            
+                            # 情况1: 标准全局注意力 (B, H, L, L)
+                            if L_dim1 == L_dim2:
+                                logger.info(f"  检测到标准注意力格式: ({B_dim}, {H_dim}, {L_dim1}, {L_dim2})")
+                                # 对 batch 和 heads 取平均
+                                attn_2d = attn.mean(dim=[0, 1])  # (L, L)
+                                # 尝试 reshape 到方形网格
+                                L = attn_2d.shape[0]
+                                sqrt_L = int(L ** 0.5)
+                                if sqrt_L * sqrt_L == L:
+                                    attn_2d = attn_2d.view(sqrt_L, sqrt_L)
+                                else:
+                                    logger.warning(f"  L={L} 不是完美平方数，使用 1D 分析")
+                                    # 使用对角线作为 1D 分布
+                                    attn_2d = torch.diag(attn_2d) if L_dim1 > 1 else attn_2d.flatten()
+                            # 情况2: Swin 窗口注意力 (num_windows*B, H, ws², ws²)
+                            elif L_dim1 != L_dim2:
+                                logger.info(
+                                    f"  检测到窗口注意力格式: ({B_dim}, {H_dim}, {L_dim1}, {L_dim2})"
+                                )
+                                # 对窗口内部维度取平均，得到每个窗口的注意力分数
+                                attn_mean = attn.mean(dim=[1, 2, 3])  # (num_windows*B,)
+                                logger.info(f"  窗口注意力分数形状: {attn_mean.shape}")
+                                
+                                # 尝试 reshape 到 2D 网格（假设窗口在图像上均匀分布）
+                                num_windows = B_dim
+                                sqrt_win = int(num_windows ** 0.5)
+                                if sqrt_win * sqrt_win == num_windows:
+                                    attn_2d = attn_mean.view(sqrt_win, sqrt_win)
+                                    logger.info(f"  ✓ 成功将 {num_windows} 个窗口 reshape 为 {sqrt_win}x{sqrt_win} 网格")
+                                else:
+                                    logger.warning(
+                                        f"  窗口数 {num_windows} 不是完美平方数 (sqrt={sqrt_win:.2f})，"
+                                        f"跳过四象限分析"
+                                    )
+                                    attn_2d = None
+                        
+                        # 处理梯度图
+                        if grad.dim() == 4:  # (B, C, H, W) - 已经是空间维度
+                            grad_2d = grad[0].mean(dim=0)  # 对通道取平均 (H, W)
+                        elif grad.dim() == 2:  # (B, L) - 序列/patch 梯度
+                            grad_1d = grad.mean(dim=0)  # (L,)
+                            # 尝试 reshape 到方形
+                            L = grad_1d.shape[0]
+                            sqrt_L = int(L ** 0.5)
+                            if sqrt_L * sqrt_L == L:
+                                grad_2d = grad_1d.view(sqrt_L, sqrt_L)
+                            else:
+                                logger.warning(f"  梯度长度 {L} 不是完美平方数")
+                                grad_2d = None
+                        
+                        # 检查是否都能转换为 2D
+                        if attn_2d is None or grad_2d is None:
+                            logger.warning(
+                                f"  无法转换为 2D 格式 (attn_2d={attn_2d is not None}, grad_2d={grad_2d is not None})，"
+                                f"跳过四象限分析"
+                            )
+                            # 跳过后续的四象限计算，直接返回
+                            return saved_paths
+                        
+                        # 确保形状完全一致
+                        if attn_2d.shape != grad_2d.shape:
+                            logger.warning(
+                                f"  形状不一致 {attn_2d.shape} vs {grad_2d.shape}，进行插值对齐"
+                            )
+                            import torch.nn.functional as F
+                            grad_2d = F.interpolate(
+                                grad_2d.unsqueeze(0).unsqueeze(0).float(),
+                                size=attn_2d.shape,
+                                mode='bilinear',
+                                align_corners=True
+                            ).squeeze()
+                        
                         # 计算四象限分布
                         quad_map = quadrant_analyzer.generate_quadrant_map(
-                            attn[0, 0], 
-                            grad[0] if grad.dim() > 0 else attn[0, 0]
+                            attn_2d, 
+                            grad_2d
                         )
                         quad_stats = quadrant_analyzer.compute_quadrant_statistics(quad_map)
                         
@@ -891,10 +1277,38 @@ class AnalysisPipeline:
                         
                         # 生成四象限可视化热力图
                         quad_viz_path = os.path.join(output_dir, "quadrant_map.png")
+                        
+                        # 如果有原图数据，作为背景传入
+                        background_img = None
+                        quad_map_resized = quad_map
+                        
+                        if hasattr(self, '_last_input_data') and self._last_input_data.dim() == 4:
+                            background_img = self._last_input_data[0]  # (C, H, W)
+                            logger.info(f"  使用原图作为四象限图背景，形状: {background_img.shape}")
+                            
+                            # 将四象限图插值到原图尺寸
+                            if background_img.dim() == 3:
+                                orig_h, orig_w = background_img.shape[1], background_img.shape[2]
+                            else:
+                                orig_h, orig_w = background_img.shape[0], background_img.shape[1]
+                            
+                            quad_h, quad_w = quad_map.shape
+                            if quad_h != orig_h or quad_w != orig_w:
+                                logger.info(f"  将四象限图从 {quad_h}x{quad_w} 插值到 {orig_h}x{orig_w}")
+                                import torch.nn.functional as F
+                                quad_map_float = quad_map.unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
+                                quad_map_resized = F.interpolate(
+                                    quad_map_float,
+                                    size=(orig_h, orig_w),
+                                    mode='nearest'  # 使用最近邻插值保持离散值
+                                ).squeeze().long()  # (H, W)
+                        
                         fig = self._heatmap_renderer.render_quadrant_map(
-                            quad_map,
+                            quad_map_resized,
                             title=f"Four Quadrant Analysis (Layer {first_layer})",
-                            save_path=quad_viz_path
+                            save_path=quad_viz_path,
+                            background_image=background_img,
+                            alpha=0.6
                         )
                         saved_paths["quadrant_viz"] = quad_viz_path
                         logger.info("已生成四象限可视化图：%s", quad_viz_path)

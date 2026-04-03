@@ -349,6 +349,8 @@ class HeatmapRenderer:
         quadrant_map: Tensor,
         title: str = "",
         save_path: Optional[str] = None,
+        background_image: Optional[Tensor] = None,
+        alpha: float = 0.6,
     ) -> Optional[Figure]:
         """
         渲染四象限图，使用离散 colormap（4 种颜色）。
@@ -358,6 +360,8 @@ class HeatmapRenderer:
                          或 (1, L, 1) 用于 1D 序列数据。
             title: 图表标题。
             save_path: 保存路径，None 则返回 Figure，传入则保存并 close。
+            background_image: 背景原图 (C, H, W) 或 (H, W, C)，如果有则叠加显示。
+            alpha: 四象限图透明度（0-1），默认 0.6。
     
         Returns:
             Figure 对象（save_path=None 时）或 None（保存后 close）。
@@ -381,7 +385,19 @@ class HeatmapRenderer:
             ax.set_xlabel("Sequence Position (Token)")
         else:
             # 2D 图像数据：正常 imshow
-            im = ax.imshow(arr, cmap=cmap_q, norm=norm, interpolation="nearest")
+            # 如果有背景图，先显示原图
+            if background_image is not None:
+                bg = background_image.detach().cpu().float()
+                if bg.ndim == 3 and bg.shape[0] in (1, 3, 4):
+                    bg = bg.permute(1, 2, 0)  # (C, H, W) -> (H, W, C)
+                bg_arr = bg.numpy()
+                if bg_arr.max() > 1.0:
+                    bg_arr = bg_arr / 255.0
+                bg_arr = np.clip(bg_arr, 0, 1)
+                ax.imshow(bg_arr)
+            
+            # 叠加四象限图
+            im = ax.imshow(arr, cmap=cmap_q, norm=norm, interpolation="nearest", alpha=alpha)
             ax.axis("off")
             
         if title:

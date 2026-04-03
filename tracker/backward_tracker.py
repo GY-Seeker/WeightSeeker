@@ -135,6 +135,10 @@ class BackwardTracker:
         1. 先尝试从 HookManager 的 _gradient_storage 中获取反向Hook捕获的梯度 (B, L)
         2. 如果 Hook 梯度不可用，回退到 compute_hidden_gradient()方法（尝试捕获隐藏状态）
         3. 如果那也不行，最后回退到从参数梯度推断
+        
+        支持架构：
+        - 标准 Transformer: nn.TransformerEncoderLayer
+        - Swin Transformer: SwinTransformerBlock (需要导入)
                 
         Returns:
             Dict[int, Tensor]: {layer_idx: gradient_tensor} 字典，
@@ -142,40 +146,68 @@ class BackwardTracker:
         """
         gradients: Dict[int, Tensor] = {}
         layer_idx = 0
+        
+        # 尝试导入 SwinTransformerBlock（如果可用）
+        swin_block_class = None
+        try:
+            from models.model_part.SwinTransformerBlock import SwinTransformerBlock
+            swin_block_class = SwinTransformerBlock
+        except ImportError as e:
+            logger.debug(f"无法导入 SwinTransformerBlock: {e}")
                 
         for name, module in self._model.named_modules():
-            if isinstance(module, nn.TransformerEncoderLayer):
-                # 方法 1：优先：从 HookManager 的反向Hook蒸存中获取梯度 (B, L)
+            # 支持标准 Transformer 和 Swin Transformer
+            is_transformer_layer = isinstance(module, nn.TransformerEncoderLayer)
+            is_swin_block = (swin_block_class is not None and 
+                            isinstance(module, swin_block_class))
+            
+            if is_transformer_layer or is_swin_block:
+                layer_type = "Swin" if is_swin_block else "Standard"
+                
+                # 方法 1：优先：从 HookManager 的反向Hook获取梯度 (B, L)
                 try:
                     hook_gradient = self._hook_manager.get_hidden_state_gradient(layer_idx)
                     if hook_gradient is not None:
                         gradients[layer_idx] = hook_gradient
-                        logger.debug(f"层 {layer_idx}: 从 Hook 奖应位获取梯度 {hook_gradient.shape}")
+                        logger.debug(f"层 {layer_idx}: 从 Hook 获取梯度 {hook_gradient.shape}")
                         layer_idx += 1
                         continue
                 except (AttributeError, KeyError):
                     pass
                     
-                # 方法 2：次优先：会试从隐藏状态直接获取梯度
+                # 方法 2：尝试从隐藏状态直接获取梯度
                 try:
                     hidden_grad = self.compute_hidden_gradient(layer_idx)
                     if hidden_grad is not None:
                         gradients[layer_idx] = hidden_grad
+                        logger.debug(f"层 {layer_idx}: 从隐藏状态获取梯度 {hidden_grad.shape}")
                         layer_idx += 1
                         continue
                 except Exception:
                     pass
                     
                 # 方法 3：最后回退：从参数梯度推断
-                output_layer = getattr(module, 'linear2', None)
-                if output_layer is not None and hasattr(output_layer, 'weight'):
-                    if output_layer.weight.grad is not None:
-                        # 从参数梯度推断
-                        grad_norm = MetricsCalculator.compute_l2_norm(output_layer.weight.grad)
+                # 对 SwinTransformerBlock，尝试 mlp 或 attn 层
+                output_layer = getattr(module, 'linear2', None) or \
+                              getattr(module, 'mlp', None) or \
+                              getattr(module, 'attn', None)
+                
+                if output_layer is not None:
+                    # 尝试获取权重
+                    weight = getattr(output_layer, 'weight', None)
+                    
+                    # 如果 output_layer 是容器（如 Mlp），尝试获取其内部的 fc2 层
+                    if weight is None:
+                        fc2 = getattr(output_layer, 'fc2', None)
+                        if fc2 is not None:
+                            weight = getattr(fc2, 'weight', None)
+                    
+                    if weight is not None and weight.grad is not None:
+                        grad_norm = MetricsCalculator.compute_l2_norm(weight.grad)
                         if grad_norm.dim() > 0:
                             grad_norm = grad_norm.mean()
                         gradients[layer_idx] = grad_norm
-                        logger.debug(f"层 {layer_idx}: 从参数梯度推断，返回标量 ")
+                        logger.debug(f"层 {layer_idx}: 从参数梯度推断，返回标量 {grad_norm.item():.6f}")
                          
                 layer_idx += 1
                 

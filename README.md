@@ -7,7 +7,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/pytorch-1.8+-ee4c2c.svg?logo=pytorch)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.0-orange.svg)](https://github.com/GY-Seeker/WeightSeeker)
+[![Version](https://img.shields.io/badge/version-0.7.0-orange.svg)](https://github.com/GY-Seeker/WeightSeeker)
 
 </div>
 
@@ -285,6 +285,19 @@ config_vit = PipelineConfig(
 ---
 
 ## 🔮 未来规划
+
+### 当前工作（v0.7 - v0.9）
+
+#### 📅 v0.8.0 - 更多架构支持与bug修复
+- [ ] 完善CNN，ResNet，等基础结构的权重跟踪和梯度跟踪
+- [ ] 完成现有代码的bug修复
+- [ ] 在三种模型上成功运行
+
+#### 📅 v0.8.5 - 代码框架整合
+- [ ] 对pipline进行整理，这个pipeline的代码看起来拉完了
+
+#### 📅 v0.9.0 - 规范开放接口
+- [ ] 完成封装，规范开放接口
 
 ### 短期目标（v1.0 - v1.1）
 

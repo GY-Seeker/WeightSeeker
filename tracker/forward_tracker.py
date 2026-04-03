@@ -60,8 +60,10 @@ class ForwardTracker:
         # 清空 hook_manager 的存储
         self._hook_manager.clear_storage()
 
-        # 设置 model 为 eval 模式
-        model.eval()
+        # 设置 model 为 train 模式以保留所有梯度（用于分析）
+        # 注意：虽然 eval 模式也能前向传播，但某些层（如 Dropout）在 eval 模式下行为不同
+        # 且为了确保参数梯度能被正确计算，使用 train 模式
+        model.train()
 
         # 确保 input_data 需要梯度（用于后续反向传播）
         if not input_data.requires_grad:
