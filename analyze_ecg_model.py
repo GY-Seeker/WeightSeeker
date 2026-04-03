@@ -158,7 +158,9 @@ def main():
     )
     
     # 由于模型需要两个输入 (ecg_signal, meta_data)，需要使用 InputAdapter
-    config.input_adapter_auxiliary = {'meta_data': torch.zeros(1, 3)}
+    # 注意：auxiliary inputs 会在运行时同步设备，但 batch_size 需要手动匹配
+    # 这里使用一个占位符，实际 batch_size 会在运行时通过 expand 匹配
+    config.input_adapter_auxiliary = {'meta_data': torch.zeros(4, 3)}  # (batch_size=4, meta_dim=3)
     
     logger.info("✓ 分析管道配置完成（已添加架构覆盖以修正累积器初始化）")
     logger.info("✓ skip_spatial=True 将自动启用时序数据可视化增强功能")

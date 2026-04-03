@@ -632,17 +632,10 @@ class AnalysisPipeline:
         is_image_data = False
         if hasattr(self, '_last_input_data'):
             is_image_data = self._last_input_data.dim() == 4  # (B, C, H, W)
-            logger.info(f"  图像模型检测：_last_input_data.dim()={self._last_input_data.dim()}, is_image_data={is_image_data}")
-        else:
-            logger.warning("  _last_input_data 未设置")
-        
-        logger.info(f"  图像模型可视化条件: skip_spatial={self.config.skip_spatial}, is_image_data={is_image_data}, has_visualizer={self._image_visualizer is not None}")
         
         if (not self.config.skip_spatial or is_image_data) and self._image_visualizer is not None:  # 图像模型
             try:
                 from .visualization.image_visualizer import compute_psnr, compute_ssim
-                
-                logger.info("开始图像模型专用可视化...")
                 
                 # 1. Patch 划分可视化
                 if hasattr(self, '_last_input_data'):
@@ -661,8 +654,6 @@ class AnalysisPipeline:
                     gradient_maps = results.get("gradient_maps", {})
                     hidden_gradients = gradient_maps.get('hidden', {})
                     
-                    logger.info(f"  Patch可视化：检查数据 - attention_maps={len(attention_maps)}层, hidden_gradients={len(hidden_gradients)}层")
-                    
                     if attention_maps and hidden_gradients:
                         try:
                             from .analyzer.fusion_utils import compute_token_importance
@@ -670,20 +661,17 @@ class AnalysisPipeline:
                             # 检查是否有完整的 (B, L) 梯度
                             has_complete_gradients = False
                             for layer_idx, grad in hidden_gradients.items():
-                                logger.info(f"    Layer {layer_idx} 梯度形状: {grad.shape}, 维度: {grad.dim()}")
                                 if grad.dim() == 2:
                                     has_complete_gradients = True
                                     break
                             
                             if has_complete_gradients:
-                                logger.info("  开始计算 token_importance...")
                                 try:
                                     token_importance_for_viz = compute_token_importance(
                                         attention_maps=attention_maps,
                                         hidden_gradients=hidden_gradients,
                                         method='gradcam',
                                     )  # (B, L)
-                                    logger.info(f"  ✓ token_importance 计算成功，形状: {token_importance_for_viz.shape}")
                                 except ValueError as e:
                                     # 形状不匹配（如窗口注意力 vs 标准注意力）
                                     logger.warning(f"  Grad-CAM 融合失败（{e}），使用纯注意力对角线")
@@ -715,20 +703,10 @@ class AnalysisPipeline:
                                     token_importance_for_viz = stacked.mean(dim=0)  # (B, L)
                                     from .analyzer.fusion_utils import normalize_for_fusion
                                     token_importance_for_viz = normalize_for_fusion(token_importance_for_viz)
-                                    logger.info(f"  ✓ 纯注意力对角线，形状: {token_importance_for_viz.shape}")
                         except Exception as e:
-                            logger.error(f"  ✗ 计算 token_importance 失败：{e}")
+                            logger.error(f"  计算 token_importance 失败：{e}")
                             import traceback
                             traceback.print_exc()
-                    else:
-                        if not attention_maps:
-                            logger.warning("  attention_maps 为空")
-                        if not hidden_gradients:
-                            logger.warning("  hidden_gradients 为空")
-                    
-                    logger.info(f"  最终 token_importance_for_viz: {token_importance_for_viz is not None}")
-                    if token_importance_for_viz is not None:
-                        logger.info(f"    形状: {token_importance_for_viz.shape}")
                     
                     self._image_visualizer.visualize_patches(
                         input_data_vis,
@@ -922,10 +900,6 @@ class AnalysisPipeline:
                 gradient_maps = results.get("gradient_maps", {})
                 hidden_gradients = gradient_maps.get('hidden', {})
                 
-                logger.info("开始时序数据融合可视化...")
-                logger.info(f"  - 注意力图层数：{len(attention_maps)}")
-                logger.info(f"  - 可用梯度层数：{len(hidden_gradients)}")
-                
                 # 检查是否有可用的完整梯度（(B, L) 形状）
                 has_complete_gradients = False
                 for grad in hidden_gradients.values():
@@ -937,25 +911,18 @@ class AnalysisPipeline:
                 
                 # 尝试使用真实梯度融合
                 if has_complete_gradients:
-                    logger.info("  ✓ 检测到完整的 (B, L) 梯度，使用真实梯度融合")
                     try:
                         token_importance = compute_token_importance(
                             attention_maps=attention_maps,
                             hidden_gradients=hidden_gradients,
                             method='gradcam',  # Grad-CAM 融合：梯度 × 注意力
                         )  # (B, L)
-                        logger.info(f"  ✓ token_importance 计算成功（梯度×注意力融合），形状：{token_importance.shape}")
                     except Exception as e:
                         logger.error("梯度融合失败，将回退到纯注意力：%s", e)
                         import traceback
                         traceback.print_exc()
                         token_importance = None
-                else:
-                    logger.warning("  - 未检测到完整的 (B, L) 梯度，将使用纯注意力作为重要性得分")
-                
-                # Fallback: 如果真实梯度不可用，使用纯注意力对角线
                 if token_importance is None:
-                    logger.info("  - 使用纯注意力对角线作为 token 重要性")
                     diagonals_per_layer = []
                     for layer_idx, attn in attention_maps.items():
                         if attn.dim() == 4:  # (B, H, L, L)
@@ -973,19 +940,14 @@ class AnalysisPipeline:
                         # 归一化到 [0, 1]
                         from .analyzer.fusion_utils import normalize_for_fusion
                         token_importance = normalize_for_fusion(token_importance)
-                        logger.info(f"  ✓ token_importance 计算成功（纯注意力），形状：{token_importance.shape}")
                 
                 # 2. 获取原始输入数据（从 forward_tracker 或外部传入）
-                # 只要有 token_importance 就执行可视化（不管是梯度融合还是纯注意力）
-                logger.info(f"  - 检查可视化条件：hasattr(_last_input_data)={hasattr(self, '_last_input_data')}, token_importance is not None={token_importance is not None}")
                 if hasattr(self, '_last_input_data') and token_importance is not None:
                         sequence = self._last_input_data  # (C, L) 或 (L,)
                         
                         # 如果 sequence 是 batch 数据 (B, C, L)，取第一个样本
                         if sequence.dim() == 3:
                             sequence = sequence[0]  # (C, L)
-                        logger.info(f"  - 可视化序列形状：{sequence.shape}")
-                        logger.info(f"  - token_importance 形状：{token_importance.shape}")
                         
                         # 3. 创建可视化器（统一配置）
                         ts_vis = TimeSeriesVisualizer(
@@ -1003,7 +965,6 @@ class AnalysisPipeline:
                                 except Exception:
                                     pass
                             
-                            logger.info(f"  - 准备生成融合图：sequence.shape={sequence.shape}, token_importance.shape={token_importance[0].shape}")
                             fig = ts_vis.render_sequence_with_attention(
                                 sequence=sequence,
                                 attention_weights=token_importance[0],  # 取第一个样本
@@ -1164,11 +1125,6 @@ class AnalysisPipeline:
                         logger.info("已生成序列四象限热力图：%s", quad_viz_path)
                     else:
                         # 图像模型：正常的 2D 四象限
-                        logger.info("生成图像数据的四象限分析...")
-                        
-                        # 调试：输出注意力矩阵的实际形状
-                        logger.info(f"  注意力矩阵形状: {attn.shape}, 维度: {attn.dim()}")
-                        logger.info(f"  梯度矩阵形状: {grad.shape}, 维度: {grad.dim()}")
                         
                         # 检查注意力矩阵是否为标准的 (B, H, L, L) 格式
                         # SwinIR 的窗口注意力可能是 (num_windows*B, H, ws², ws²) 格式
@@ -1181,7 +1137,6 @@ class AnalysisPipeline:
                             
                             # 情况1: 标准全局注意力 (B, H, L, L)
                             if L_dim1 == L_dim2:
-                                logger.info(f"  检测到标准注意力格式: ({B_dim}, {H_dim}, {L_dim1}, {L_dim2})")
                                 # 对 batch 和 heads 取平均
                                 attn_2d = attn.mean(dim=[0, 1])  # (L, L)
                                 # 尝试 reshape 到方形网格
@@ -1195,19 +1150,14 @@ class AnalysisPipeline:
                                     attn_2d = torch.diag(attn_2d) if L_dim1 > 1 else attn_2d.flatten()
                             # 情况2: Swin 窗口注意力 (num_windows*B, H, ws², ws²)
                             elif L_dim1 != L_dim2:
-                                logger.info(
-                                    f"  检测到窗口注意力格式: ({B_dim}, {H_dim}, {L_dim1}, {L_dim2})"
-                                )
                                 # 对窗口内部维度取平均，得到每个窗口的注意力分数
                                 attn_mean = attn.mean(dim=[1, 2, 3])  # (num_windows*B,)
-                                logger.info(f"  窗口注意力分数形状: {attn_mean.shape}")
                                 
                                 # 尝试 reshape 到 2D 网格（假设窗口在图像上均匀分布）
                                 num_windows = B_dim
                                 sqrt_win = int(num_windows ** 0.5)
                                 if sqrt_win * sqrt_win == num_windows:
                                     attn_2d = attn_mean.view(sqrt_win, sqrt_win)
-                                    logger.info(f"  ✓ 成功将 {num_windows} 个窗口 reshape 为 {sqrt_win}x{sqrt_win} 网格")
                                 else:
                                     logger.warning(
                                         f"  窗口数 {num_windows} 不是完美平方数 (sqrt={sqrt_win:.2f})，"
@@ -1235,11 +1185,13 @@ class AnalysisPipeline:
                                 f"  无法转换为 2D 格式 (attn_2d={attn_2d is not None}, grad_2d={grad_2d is not None})，"
                                 f"跳过四象限分析"
                             )
-                            # 跳过后续的四象限计算，直接返回
-                            return saved_paths
+                            # 跳过后续的四象限计算，继续执行其他可视化
+                            quad_skipped = True
+                        else:
+                            quad_skipped = False
                         
-                        # 确保形状完全一致
-                        if attn_2d.shape != grad_2d.shape:
+                        # 确保形状完全一致（仅当未跳过时）
+                        if not quad_skipped and attn_2d.shape != grad_2d.shape:
                             logger.warning(
                                 f"  形状不一致 {attn_2d.shape} vs {grad_2d.shape}，进行插值对齐"
                             )
@@ -1251,67 +1203,66 @@ class AnalysisPipeline:
                                 align_corners=True
                             ).squeeze()
                         
-                        # 计算四象限分布
-                        quad_map = quadrant_analyzer.generate_quadrant_map(
-                            attn_2d, 
-                            grad_2d
-                        )
-                        quad_stats = quadrant_analyzer.compute_quadrant_statistics(quad_map)
-                        
-                        # 保存四象限统计到文本文件
-                        quad_txt_path = os.path.join(output_dir, "quadrant_analysis.txt")
-                        with open(quad_txt_path, "w", encoding="utf-8") as f:
-                            f.write("四象限分析报告\n")
-                            f.write("=" * 50 + "\n\n")
-                            f.write(f"分析层：Layer {first_layer}\n")
-                            f.write(f"阈值方法：中位数\n\n")
-                            for quadrant, ratio in quad_stats.items():
-                                f.write(f"{quadrant.name}: {ratio*100:.2f}%\n")
-                            f.write("\n说明：\n")
-                            f.write("- 核心判别区：高注意力 + 高梯度（真正重要的区域）\n")
-                            f.write("- 冗余关注区：高注意力 + 低梯度（可能是噪声）\n")
-                            f.write("- 潜在影响区：低注意力 + 高梯度（隐性影响因素）\n")
-                            f.write("- 无关区域：低注意力 + 低梯度\n")
-                        saved_paths["quadrant_analysis"] = quad_txt_path
-                        logger.info("已生成四象限分析：%s", quad_txt_path)
-                        
-                        # 生成四象限可视化热力图
-                        quad_viz_path = os.path.join(output_dir, "quadrant_map.png")
-                        
-                        # 如果有原图数据，作为背景传入
-                        background_img = None
-                        quad_map_resized = quad_map
-                        
-                        if hasattr(self, '_last_input_data') and self._last_input_data.dim() == 4:
-                            background_img = self._last_input_data[0]  # (C, H, W)
-                            logger.info(f"  使用原图作为四象限图背景，形状: {background_img.shape}")
+                        # 计算四象限分布（仅当未跳过时）
+                        if not quad_skipped:
+                            quad_map = quadrant_analyzer.generate_quadrant_map(
+                                attn_2d, 
+                                grad_2d
+                            )
+                            quad_stats = quadrant_analyzer.compute_quadrant_statistics(quad_map)
                             
-                            # 将四象限图插值到原图尺寸
-                            if background_img.dim() == 3:
-                                orig_h, orig_w = background_img.shape[1], background_img.shape[2]
-                            else:
-                                orig_h, orig_w = background_img.shape[0], background_img.shape[1]
+                            # 保存四象限统计到文本文件
+                            quad_txt_path = os.path.join(output_dir, "quadrant_analysis.txt")
+                            with open(quad_txt_path, "w", encoding="utf-8") as f:
+                                f.write("四象限分析报告\n")
+                                f.write("=" * 50 + "\n\n")
+                                f.write(f"分析层：Layer {first_layer}\n")
+                                f.write(f"阈值方法：中位数\n\n")
+                                for quadrant, ratio in quad_stats.items():
+                                    f.write(f"{quadrant.name}: {ratio*100:.2f}%\n")
+                                f.write("\n说明：\n")
+                                f.write("- 核心判别区：高注意力 + 高梯度（真正重要的区域）\n")
+                                f.write("- 冗余关注区：高注意力 + 低梯度（可能是噪声）\n")
+                                f.write("- 潜在影响区：低注意力 + 高梯度（隐性影响因素）\n")
+                                f.write("- 无关区域：低注意力 + 低梯度\n")
+                            saved_paths["quadrant_analysis"] = quad_txt_path
+                            logger.info("已生成四象限分析：%s", quad_txt_path)
                             
-                            quad_h, quad_w = quad_map.shape
-                            if quad_h != orig_h or quad_w != orig_w:
-                                logger.info(f"  将四象限图从 {quad_h}x{quad_w} 插值到 {orig_h}x{orig_w}")
-                                import torch.nn.functional as F
-                                quad_map_float = quad_map.unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
-                                quad_map_resized = F.interpolate(
-                                    quad_map_float,
-                                    size=(orig_h, orig_w),
-                                    mode='nearest'  # 使用最近邻插值保持离散值
-                                ).squeeze().long()  # (H, W)
-                        
-                        fig = self._heatmap_renderer.render_quadrant_map(
-                            quad_map_resized,
-                            title=f"Four Quadrant Analysis (Layer {first_layer})",
-                            save_path=quad_viz_path,
-                            background_image=background_img,
-                            alpha=0.6
-                        )
-                        saved_paths["quadrant_viz"] = quad_viz_path
-                        logger.info("已生成四象限可视化图：%s", quad_viz_path)
+                            # 生成四象限可视化热力图
+                            quad_viz_path = os.path.join(output_dir, "quadrant_map.png")
+                            
+                            # 如果有原图数据，作为背景传入
+                            background_img = None
+                            quad_map_resized = quad_map
+                            
+                            if hasattr(self, '_last_input_data') and self._last_input_data.dim() == 4:
+                                background_img = self._last_input_data[0]  # (C, H, W)
+                                
+                                # 将四象限图插值到原图尺寸
+                                if background_img.dim() == 3:
+                                    orig_h, orig_w = background_img.shape[1], background_img.shape[2]
+                                else:
+                                    orig_h, orig_w = background_img.shape[0], background_img.shape[1]
+                                
+                                quad_h, quad_w = quad_map.shape
+                                if quad_h != orig_h or quad_w != orig_w:
+                                    import torch.nn.functional as F
+                                    quad_map_float = quad_map.unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
+                                    quad_map_resized = F.interpolate(
+                                        quad_map_float,
+                                        size=(orig_h, orig_w),
+                                        mode='nearest'  # 使用最近邻插值保持离散值
+                                    ).squeeze().long()  # (H, W)
+                            
+                            fig = self._heatmap_renderer.render_quadrant_map(
+                                quad_map_resized,
+                                title=f"Four Quadrant Analysis (Layer {first_layer})",
+                                save_path=quad_viz_path,
+                                background_image=background_img,
+                                alpha=0.6
+                            )
+                            saved_paths["quadrant_viz"] = quad_viz_path
+                            logger.info("已生成四象限可视化图：%s", quad_viz_path)
             except Exception as e:
                 logger.error("四象限分析失败：%s", e)
         if not self.config.skip_global_diagnosis and self._accumulator is not None:
@@ -1429,72 +1380,6 @@ class AnalysisPipeline:
                 serializable[k] = v
         torch.save(serializable, path)
         logger.info("结果已保存到：%s", path)
-
-    def _render_quadrant_bar_chart(
-        self,
-        quad_stats: Dict[Quadrant, float],
-        save_path: Optional[str] = None,
-    ) -> None:
-        """
-        绘制四象限分布条形图（适用于 1D 序列数据）。
-        
-        Args:
-            quad_stats: 四象限统计字典 {Quadrant: ratio}
-            save_path: 保存路径，None 则不保存
-        """
-        import matplotlib.pyplot as plt
-        
-        # 准备数据
-        labels = []
-        ratios = []
-        colors = []
-        
-        color_map = {
-            Quadrant.CORE_DISCRIMINATIVE: "#d62728",  # 红色
-            Quadrant.REDUNDANT_ATTENTION: "#2ca02c",   # 绿色
-            Quadrant.POTENTIAL_INFLUENCE: "#1f77b4",   # 蓝色
-            Quadrant.IRRELEVANT: "#7f7f7f",            # 灰色
-        }
-        
-        label_map = {
-            Quadrant.CORE_DISCRIMINATIVE: "Core Discriminative\n(核心判别区)",
-            Quadrant.REDUNDANT_ATTENTION: "Redundant Attention\n(冗余关注区)",
-            Quadrant.POTENTIAL_INFLUENCE: "Potential Influence\n(潜在影响区)",
-            Quadrant.IRRELEVANT: "Irrelevant\n(无关区域)",
-        }
-        
-        for quadrant in [Quadrant.CORE_DISCRIMINATIVE, Quadrant.REDUNDANT_ATTENTION,
-                         Quadrant.POTENTIAL_INFLUENCE, Quadrant.IRRELEVANT]:
-            labels.append(label_map[quadrant])
-            ratios.append(quad_stats.get(quadrant, 0.0) * 100)
-            colors.append(color_map[quadrant])
-        
-        # 创建图表
-        fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-        bars = ax.bar(labels, ratios, color=colors, edgecolor='black', linewidth=1.5)
-        
-        # 添加数值标签
-        for bar, ratio in zip(bars, ratios):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{ratio:.1f}%',
-                   ha='center', va='bottom', fontsize=10, fontweight='bold')
-        
-        ax.set_ylabel('Percentage (%)', fontsize=11)
-        ax.set_title('Four Quadrant Distribution (Sequence Data)', fontsize=12, fontweight='bold')
-        ax.set_ylim(0, max(ratios) * 1.3 if max(ratios) > 0 else 100)
-        ax.grid(axis='y', alpha=0.3, linestyle='--', linewidth=0.7)
-        
-        plt.tight_layout()
-        
-        # 保存或显示
-        if save_path:
-            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            plt.close(fig)
-            logger.debug(f"四象限条形图已保存到：{save_path}")
-        else:
-            plt.show()
 
     # ------------------------------------------------------------------
     # 兼容旧接口（design.md §3.9 中的接口签名）

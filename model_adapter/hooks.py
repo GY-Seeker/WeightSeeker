@@ -233,10 +233,15 @@ class HookManager:
                 tensor = None
 
             if tensor is not None:
-                # 保存克隆的张量（使用clone避克隆子图窗口问题）
+                # 保存克隆的张量（使用clone避克clone子图窗口问题）
                 stored_tensor = tensor.clone()
+                            
+                # 【修复】为非叶子张量启用梯度保留
+                if stored_tensor.requires_grad and not stored_tensor.is_leaf:
+                    stored_tensor.retain_grad()
+                            
                 self._hook_storage.setdefault("hidden_state", {})[layer_idx] = stored_tensor
-                
+                            
                 # 关键：在原始张量上直接注册反向Hook（而不是克隆张量）
                 # 因为clone后的非叶张量不会自动还原梯度
                 if tensor.requires_grad:
