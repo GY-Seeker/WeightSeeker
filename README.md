@@ -237,7 +237,7 @@ analysis_output/
 - 但梯度值很低（实际对分类无贡献）
 - 最终被正确识别为"冗余关注区"（背景噪声）
 
-### 4️⃣ **灵活的模块化设计**
+### 4️⃣ **模块化设计**
 
 通过 `PipelineConfig` 可自由组合分析策略：
 
@@ -262,7 +262,7 @@ config_vit = PipelineConfig(
 )
 ```
 
-### 5️⃣ **丰富的可视化输出**
+### 5️⃣ **可视化输出**
 
 提供 5+ 种专业图表类型：
 
@@ -274,7 +274,7 @@ config_vit = PipelineConfig(
 | 🎯 频率 - 重要性散点图 | 二维定位冗余头 | 模型压缩指导 |
 | 📈 多层对比面板 | 并列展示不同层的注意力分布 | 深度差异分析 |
 
-### 6️⃣ **工业级可靠性**
+### 6️⃣ **可靠性**
 
 - ✅ 内存保护：累积器超限自动触发早停
 - ✅ 异常处理：每个 Stage 独立 try-catch，局部失败不影响全局
@@ -286,48 +286,30 @@ config_vit = PipelineConfig(
 
 ## 🔮 未来规划
 
-### 短期目标（v1.3 - v1.5）
+### 短期目标（v1.0 - v1.1）
 
-#### 📅 v1.3.0 - Web Dashboard（计划中）
-- [ ] 交互式可视化界面（基于 Plotly Dash）
-- [ ] 实时显示分析进度和统计图表
-- [ ] 支持在线调整阈值和参数
-- [ ] 导出 HTML 报告功能
+#### 📅 v1.0.0 - 更多架构支持（计划中）与bug修复
+- [ ] 适配大模型梯度跟踪
+- [ ] 适配大模型注意力跟踪
+- [ ] 支持 LLaMA、ChatGLM 等主流大语言模型（蒸馏模型）的分析
 
-#### 📅 v1.4.0 - 增强融合策略（计划中）
-- [ ] 实现 Grad-CAM++、Score-CAM 等先进融合算法
-- [ ] 支持用户自定义融合函数
-- [ ] 添加融合效果评估指标
-
-#### 📅 v1.5.0 - 更多架构支持（计划中）
-- [ ] DeiT (Data-efficient Image Transformers)
-- [ ] BEiT (BERT pre-trained Image Transformer)
-- [ ] TimeSformer (视频理解)
-- [ ] Perceiver IO (多模态通用架构)
+#### 📅 v1.1.0 - 可视化界面
 
 ### 中期目标（v2.0）
 
-#### 🎯 自动化模型压缩建议
-基于分析结果自动生成：
-- 冗余头剪枝清单（激活频率低 + 梯度贡献低）
-- 层数精简建议（梯度接近 0 的层）
-- MoE 专家数量优化方案
-- 量化敏感度分析
+#### 🎯 性能优化
+- [ ] 分布式分析支持（多 GPU 并行）
+- [ ] 内存占用优化（稀疏累积器）
+- [ ] 分析速度提升（批处理优化）
 
-#### 🎯 对比分析模式
-- 同一模型不同训练阶段的演化分析
-- 不同模型在同一任务上的注意力模式对比
-- 超参数敏感性分析（层数/头数/隐藏维度）
-
-#### 🎯 领域专用模板
-- **医疗 AI**：ECG/EEG/医学影像的专用分析模板
-- **NLP**：文本分类/机器翻译的注意力解释
-- **CV**：目标检测/分割任务的可视化增强
+#### 🎯 分析数据对接大模型
+- [ ] 将分析数据与图像送入大模型进行综合分析（可选）
+- [ ] 我们仍密切关注，大模型对于这些数据的分析正确性。
 
 ### 长期愿景（v3.0+）
 
-#### 🌟 实时训练监控插件
-集成到 PyTorch 训练循环：
+#### 🌟 集成到训练过程中
+无缝集成到 PyTorch 训练循环：
 ```python
 from transformer_analyzer import TrainingMonitor
 
@@ -340,25 +322,16 @@ for epoch in range(epochs):
 monitor.generate_report()  # 生成训练全过程报告
 ```
 
-#### 🌟 分布式训练支持
-- 支持 DeepSpeed、FSDP 等分布式框架
-- 多 GPU 累积器同步机制
-- 大规模集群下的采样策略
-
-#### 🌟 自动异常检测与修复建议
-利用机器学习识别：
-- 注意力坍塌（Attention Collapse）
-- 梯度消失/爆炸的早期征兆
-- 过拟合的注意力模式特征
-- 并提供针对性的修复建议（学习率调整、正则化增强等）
+- 实时监控训练动态
+- 自动异常检测与预警
+- 训练过程可视化面板
+- 超参数调优建议
 
 ---
 
 ## 📚 文档与资源
-
+- **📋 [需求文档](prd.md)** - 产品需求和技术约束
 - **📄 [设计文档](design.md)** - 详细的架构设计和模块说明
-- **📋 [需求文档](prd.txt)** - 产品需求和技术约束
-- **💻 [示例代码](tests/test_minimal_pipeline_v1.0.py)** - 最小闭环测试
 - **🐛 [问题反馈](https://github.com/GY-Seeker/WeightSeeker/issues)** - GitHub Issues
 
 ---
@@ -381,10 +354,12 @@ monitor.generate_report()  # 生成训练全过程报告
 
 ---
 
-## 👥 作者团队
+## 👤 About the Author
 
-- **主要开发**: Transformer Analyzer Team
-- **GitHub**: [@GY-Seeker](https://github.com/GY-Seeker/WeightSeeker)
+**Guo Yang**  
+Xidian University  
+Hangzhou Institute  
+📧 guoyang@xidian.edu.cn
 
 ---
 
@@ -401,6 +376,6 @@ monitor.generate_report()  # 生成训练全过程报告
 
 **如果这个项目对你有帮助，请给一个 ⭐ Star！**
 
-Made with ❤️ by Transformer Analyzer Team
+Made with ❤️ by Guo Yang
 
 </div>

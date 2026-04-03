@@ -23,7 +23,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from .core.config import Config
-from .core.types import AccumulatorState, ModelArchitecture, ModelInfo
+from .core.types import AccumulatorState, ModelArchitecture, ModelInfo, Quadrant
 
 logger = logging.getLogger(__name__)
 
@@ -681,9 +681,11 @@ class AnalysisPipeline:
                         from .analyzer.fusion_utils import normalize_for_fusion
                         token_importance = normalize_for_fusion(token_importance)
                         logger.info(f"  ✓ token_importance 计算成功（纯注意力），形状：{token_importance.shape}")
-                    
-                    # 2. 获取原始输入数据（从 forward_tracker 或外部传入）
-                    if hasattr(self, '_last_input_data') and token_importance is not None:
+                
+                # 2. 获取原始输入数据（从 forward_tracker 或外部传入）
+                # 只要有 token_importance 就执行可视化（不管是梯度融合还是纯注意力）
+                logger.info(f"  - 检查可视化条件：hasattr(_last_input_data)={hasattr(self, '_last_input_data')}, token_importance is not None={token_importance is not None}")
+                if hasattr(self, '_last_input_data') and token_importance is not None:
                         sequence = self._last_input_data  # (C, L) 或 (L,)
                         
                         # 如果 sequence 是 batch 数据 (B, C, L)，取第一个样本
@@ -708,6 +710,7 @@ class AnalysisPipeline:
                                 except Exception:
                                     pass
                             
+                            logger.info(f"  - 准备生成融合图：sequence.shape={sequence.shape}, token_importance.shape={token_importance[0].shape}")
                             fig = ts_vis.render_sequence_with_attention(
                                 sequence=sequence,
                                 attention_weights=token_importance[0],  # 取第一个样本
@@ -718,9 +721,7 @@ class AnalysisPipeline:
                             saved_paths["token_importance_fusion"] = fusion_path
                             logger.info("已生成融合可视化：%s", fusion_path)
                         except Exception as e:
-                            logger.error("render_sequence_with_attention 失败：%s", e)
-                            import traceback
-                            traceback.print_exc()
+                            logger.error("render_sequence_with_attention 失败：%s", e, exc_info=True)
                         
                         # 5. 检测关键位置并标注
                         sequence_np = sequence.cpu().numpy()
@@ -791,11 +792,14 @@ class AnalysisPipeline:
         except Exception as e:
             logger.error("统计图生成失败：%s", e)
 
-        # 四象限分析图（新增）
-        if not self.config.skip_spatial and self._heatmap_renderer is not None:
+        # 四象限分析（新增）
+        if self._heatmap_renderer is not None:
             try:
                 from .analyzer.quadrant import QuadrantAnalyzer
                 quadrant_analyzer = QuadrantAnalyzer(threshold_method="median")
+                
+                # 从结果中提取隐藏状态梯度
+                hidden_states = results.get("gradient_maps", {}).get("hidden", {})
                 
                 # 取第一层做示例
                 if attention_maps and hidden_states:
@@ -803,34 +807,97 @@ class AnalysisPipeline:
                     attn = attention_maps[first_layer]
                     grad = hidden_states.get(first_layer, attn)
                     
-                    # 如果是序列数据，跳过空间重构但保留四象限概念
+                    # 如果是序列数据，将注意力图视为 1D 空间
                     if self.config.skip_spatial:
-                        # 1D 序列模型：将序列视为 1D 空间
+                        # 1D 序列模型：使用平均注意力图 (B, L)
                         logger.info("生成序列数据的四象限分析...")
+                        # 从 (B, H, L, L) 提取对角线作为 1D 注意力分布
+                        if attn.dim() == 4:  # (B, H, L, L)
+                            B, H, L, _ = attn.shape
+                            # 取每个头的自注意力对角线平均
+                            diagonal_attn = torch.stack([
+                                attn[:, h, range(L), range(L)].mean(dim=0) 
+                                for h in range(H)
+                            ], dim=0).mean(dim=0)  # (L,)
+                        else:
+                            diagonal_attn = attn.mean(dim=(0, 1)) if attn.dim() > 1 else attn.flatten()
+                        
+                        # 梯度也转为 1D
+                        if grad.dim() == 2:  # (B, L)
+                            grad_1d = grad.mean(dim=0)  # (L,)
+                        else:
+                            grad_1d = diagonal_attn.clone()  # fallback
+                        
+                        # 生成 1D 四象限分类图
+                        quad_map_1d = quadrant_analyzer.generate_quadrant_map(
+                            diagonal_attn.unsqueeze(0).unsqueeze(-1),  # (1, L, 1)
+                            grad_1d.unsqueeze(0).unsqueeze(-1)  # (1, L, 1)
+                        ).squeeze()  # (L,)
+                        
+                        # 保存四象限统计到文本文件
+                        quad_txt_path = os.path.join(output_dir, "quadrant_analysis.txt")
+                        with open(quad_txt_path, "w", encoding="utf-8") as f:
+                            f.write("四象限分析报告\n")
+                            f.write("=" * 50 + "\n\n")
+                            f.write(f"分析层：Layer {first_layer}\n")
+                            f.write(f"阈值方法：中位数\n\n")
+                            quad_stats = quadrant_analyzer.compute_quadrant_statistics(quad_map_1d.view(1, -1, 1))
+                            for quadrant, ratio in quad_stats.items():
+                                f.write(f"{quadrant.name}: {ratio*100:.2f}%\n")
+                            f.write("\n说明：\n")
+                            f.write("- 核心判别区：高注意力 + 高梯度（真正重要的区域）\n")
+                            f.write("- 冗余关注区：高注意力 + 低梯度（可能是噪声）\n")
+                            f.write("- 潜在影响区：低注意力 + 高梯度（隐性影响因素）\n")
+                            f.write("- 无关区域：低注意力 + 低梯度\n")
+                        saved_paths["quadrant_analysis"] = quad_txt_path
+                        logger.info("已生成四象限分析：%s", quad_txt_path)
+                        
+                        # 生成四象限可视化热力图（在原始序列空间上标注）
+                        quad_viz_path = os.path.join(output_dir, "quadrant_map_seq.png")
+                        fig = self._heatmap_renderer.render_quadrant_map(
+                            quad_map_1d.unsqueeze(0).unsqueeze(-1),  # 转为 (1, L, 1) 用于渲染
+                            title=f"Four Quadrant Analysis (Sequence Data, Layer {first_layer})",
+                            save_path=quad_viz_path
+                        )
+                        saved_paths["quadrant_viz_seq"] = quad_viz_path
+                        logger.info("已生成序列四象限热力图：%s", quad_viz_path)
                     else:
                         # 图像模型：正常的 2D 四象限
                         logger.info("生成图像数据的四象限分析...")
-                    
-                    # 计算四象限分布
-                    quad_map = quadrant_analyzer.generate_quadrant_map(attn[0, 0], grad[0] if grad.dim() > 0 else attn[0, 0])
-                    quad_stats = quadrant_analyzer.compute_quadrant_statistics(quad_map)
-                    
-                    # 保存四象限统计到文本文件
-                    quad_txt_path = os.path.join(output_dir, "quadrant_analysis.txt")
-                    with open(quad_txt_path, "w", encoding="utf-8") as f:
-                        f.write("四象限分析报告\n")
-                        f.write("=" * 50 + "\n\n")
-                        f.write(f"分析层：Layer {first_layer}\n")
-                        f.write(f"阈值方法：中位数\n\n")
-                        for quadrant, ratio in quad_stats.items():
-                            f.write(f"{quadrant.name}: {ratio*100:.2f}%\n")
-                        f.write("\n说明：\n")
-                        f.write("- 核心判别区：高注意力 + 高梯度（真正重要的区域）\n")
-                        f.write("- 冗余关注区：高注意力 + 低梯度（可能是噪声）\n")
-                        f.write("- 潜在影响区：低注意力 + 高梯度（隐性影响因素）\n")
-                        f.write("- 无关区域：低注意力 + 低梯度\n")
-                    saved_paths["quadrant_analysis"] = quad_txt_path
-                    logger.info("已生成四象限分析：%s", quad_txt_path)
+                        
+                        # 计算四象限分布
+                        quad_map = quadrant_analyzer.generate_quadrant_map(
+                            attn[0, 0], 
+                            grad[0] if grad.dim() > 0 else attn[0, 0]
+                        )
+                        quad_stats = quadrant_analyzer.compute_quadrant_statistics(quad_map)
+                        
+                        # 保存四象限统计到文本文件
+                        quad_txt_path = os.path.join(output_dir, "quadrant_analysis.txt")
+                        with open(quad_txt_path, "w", encoding="utf-8") as f:
+                            f.write("四象限分析报告\n")
+                            f.write("=" * 50 + "\n\n")
+                            f.write(f"分析层：Layer {first_layer}\n")
+                            f.write(f"阈值方法：中位数\n\n")
+                            for quadrant, ratio in quad_stats.items():
+                                f.write(f"{quadrant.name}: {ratio*100:.2f}%\n")
+                            f.write("\n说明：\n")
+                            f.write("- 核心判别区：高注意力 + 高梯度（真正重要的区域）\n")
+                            f.write("- 冗余关注区：高注意力 + 低梯度（可能是噪声）\n")
+                            f.write("- 潜在影响区：低注意力 + 高梯度（隐性影响因素）\n")
+                            f.write("- 无关区域：低注意力 + 低梯度\n")
+                        saved_paths["quadrant_analysis"] = quad_txt_path
+                        logger.info("已生成四象限分析：%s", quad_txt_path)
+                        
+                        # 生成四象限可视化热力图
+                        quad_viz_path = os.path.join(output_dir, "quadrant_map.png")
+                        fig = self._heatmap_renderer.render_quadrant_map(
+                            quad_map,
+                            title=f"Four Quadrant Analysis (Layer {first_layer})",
+                            save_path=quad_viz_path
+                        )
+                        saved_paths["quadrant_viz"] = quad_viz_path
+                        logger.info("已生成四象限可视化图：%s", quad_viz_path)
             except Exception as e:
                 logger.error("四象限分析失败：%s", e)
         if not self.config.skip_global_diagnosis and self._accumulator is not None:
@@ -948,6 +1015,72 @@ class AnalysisPipeline:
                 serializable[k] = v
         torch.save(serializable, path)
         logger.info("结果已保存到：%s", path)
+
+    def _render_quadrant_bar_chart(
+        self,
+        quad_stats: Dict[Quadrant, float],
+        save_path: Optional[str] = None,
+    ) -> None:
+        """
+        绘制四象限分布条形图（适用于 1D 序列数据）。
+        
+        Args:
+            quad_stats: 四象限统计字典 {Quadrant: ratio}
+            save_path: 保存路径，None 则不保存
+        """
+        import matplotlib.pyplot as plt
+        
+        # 准备数据
+        labels = []
+        ratios = []
+        colors = []
+        
+        color_map = {
+            Quadrant.CORE_DISCRIMINATIVE: "#d62728",  # 红色
+            Quadrant.REDUNDANT_ATTENTION: "#2ca02c",   # 绿色
+            Quadrant.POTENTIAL_INFLUENCE: "#1f77b4",   # 蓝色
+            Quadrant.IRRELEVANT: "#7f7f7f",            # 灰色
+        }
+        
+        label_map = {
+            Quadrant.CORE_DISCRIMINATIVE: "Core Discriminative\n(核心判别区)",
+            Quadrant.REDUNDANT_ATTENTION: "Redundant Attention\n(冗余关注区)",
+            Quadrant.POTENTIAL_INFLUENCE: "Potential Influence\n(潜在影响区)",
+            Quadrant.IRRELEVANT: "Irrelevant\n(无关区域)",
+        }
+        
+        for quadrant in [Quadrant.CORE_DISCRIMINATIVE, Quadrant.REDUNDANT_ATTENTION,
+                         Quadrant.POTENTIAL_INFLUENCE, Quadrant.IRRELEVANT]:
+            labels.append(label_map[quadrant])
+            ratios.append(quad_stats.get(quadrant, 0.0) * 100)
+            colors.append(color_map[quadrant])
+        
+        # 创建图表
+        fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
+        bars = ax.bar(labels, ratios, color=colors, edgecolor='black', linewidth=1.5)
+        
+        # 添加数值标签
+        for bar, ratio in zip(bars, ratios):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{ratio:.1f}%',
+                   ha='center', va='bottom', fontsize=10, fontweight='bold')
+        
+        ax.set_ylabel('Percentage (%)', fontsize=11)
+        ax.set_title('Four Quadrant Distribution (Sequence Data)', fontsize=12, fontweight='bold')
+        ax.set_ylim(0, max(ratios) * 1.3 if max(ratios) > 0 else 100)
+        ax.grid(axis='y', alpha=0.3, linestyle='--', linewidth=0.7)
+        
+        plt.tight_layout()
+        
+        # 保存或显示
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            logger.debug(f"四象限条形图已保存到：{save_path}")
+        else:
+            plt.show()
 
     # ------------------------------------------------------------------
     # 兼容旧接口（design.md §3.9 中的接口签名）

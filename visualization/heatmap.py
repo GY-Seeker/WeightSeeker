@@ -351,13 +351,14 @@ class HeatmapRenderer:
         save_path: Optional[str] = None,
     ) -> Optional[Figure]:
         """
-        渲染四象限图，使用离散 colormap（4种颜色）。
-
+        渲染四象限图，使用离散 colormap（4 种颜色）。
+    
         Args:
             quadrant_map: (H, W) 整数张量，值域 [1, 4]（对应 4 个象限）。
+                         或 (1, L, 1) 用于 1D 序列数据。
             title: 图表标题。
             save_path: 保存路径，None 则返回 Figure，传入则保存并 close。
-
+    
         Returns:
             Figure 对象（save_path=None 时）或 None（保存后 close）。
         """
@@ -365,18 +366,34 @@ class HeatmapRenderer:
         from matplotlib.colors import ListedColormap, BoundaryNorm
         cmap_q = ListedColormap(self._QUADRANT_COLORS)
         norm = BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5], cmap_q.N)
-
+    
         fig, ax = plt.subplots(figsize=self.figsize, dpi=self.dpi)
-        im = ax.imshow(arr, cmap=cmap_q, norm=norm, interpolation="nearest")
+            
+        # 处理 1D 序列数据：(1, L, 1) -> 展平为水平条形图
+        if arr.ndim == 3 and arr.shape[0] == 1 and arr.shape[2] == 1:
+            arr_1d = arr[0, :, 0]  # (L,)
+            # 创建水平条形图
+            L = len(arr_1d)
+            im = ax.imshow(arr_1d.reshape(1, -1), cmap=cmap_q, norm=norm, 
+                          interpolation="nearest", aspect="auto")
+            ax.set_xlim(0, L)
+            ax.set_yticks([])
+            ax.set_xlabel("Sequence Position (Token)")
+        else:
+            # 2D 图像数据：正常 imshow
+            im = ax.imshow(arr, cmap=cmap_q, norm=norm, interpolation="nearest")
+            ax.axis("off")
+            
         if title:
             ax.set_title(title, fontsize=11)
-        ax.axis("off")
-        labels = ["Core Discriminative", "Redundant Attention",
-                  "Potential Influence", "Irrelevant"]
+            
+        # 添加图例
+        labels = ["Core Discriminative\n(核心判别区)", "Redundant Attention\n(冗余关注区)",
+                  "Potential Influence\n(潜在影响区)", "Irrelevant\n(无关区域)"]
         import matplotlib.patches as mpatches
         patches = [mpatches.Patch(color=self._QUADRANT_COLORS[i], label=labels[i])
                    for i in range(4)]
-        ax.legend(handles=patches, loc="lower right", fontsize=8)
+        ax.legend(handles=patches, loc="lower right", fontsize=7)
         plt.tight_layout()
         return self._save_and_close(fig, save_path)
 
