@@ -139,7 +139,7 @@ def main():
     # 由于这是 1D 序列模型，需要跳过空间重构阶段
     # 同时添加 detector_override 来避免 ArchitectureDetector 对多模态模型的误判
     config = PipelineConfig(
-        skip_spatial=True,              # 1D 序列不需要空间重构
+        skip_spatial=True,              # 1D 序列不需要空间重构（关键！启用时序数据可视化）
         skip_global_diagnosis=False,    # 启用全局诊断
         skip_fusion=False,              # 启用特征融合
         skip_visualization=False,       # 启用可视化
@@ -161,6 +161,7 @@ def main():
     config.input_adapter_auxiliary = {'meta_data': torch.zeros(1, 3)}
     
     logger.info("✓ 分析管道配置完成（已添加架构覆盖以修正累积器初始化）")
+    logger.info("✓ skip_spatial=True 将自动启用时序数据可视化增强功能")
     
     # ==================== 步骤 4: 执行分析 ====================
     logger.info("\n[步骤 4] 执行模型分析...")
@@ -208,6 +209,35 @@ def main():
             logger.info("\n已生成的可视化文件:")
             for name, path in vis_paths.items():
                 logger.info(f"  - {name}: {path}")
+            
+            # 重点标注新增的时序数据可视化文件
+            logger.info("\n【时序数据可视化增强】⭐ 主要图表:")
+            expected_files = {
+                'token_importance_fusion': 'Token 重要性融合图（注意力×梯度）',
+                'key_segments_annotation': '关键区段标注图（峰值/谷值/突变点）',
+                'multi_layer_attention_seq': '多层注意力对比图（时序版）',
+            }
+            for key, desc in expected_files.items():
+                if key in vis_paths:
+                    logger.info(f"  ✅ {key}: {desc}")
+                    logger.info(f"     路径：{vis_paths[key]}")
+                else:
+                    logger.warning(f"  ⚠️ {key} 未生成（可能缺少梯度信息）")
+            
+            logger.info("\n【保留的通用图表】:")
+            retained_files = {
+                'all_heads_heatmap': '所有注意力头全景热力图',
+                'multi_layer_comparison': '多层注意力对比图（通用版）',
+            }
+            for key, desc in retained_files.items():
+                if key in vis_paths:
+                    logger.info(f"  ✓ {key}: {desc}")
+            
+            logger.info("\n【已弃用的图表】:")
+            if 'attention_heatmap' not in vis_paths:
+                logger.info("  ❌ attention_heatmap.png 已成功弃用（不再作为主要输出）")
+            else:
+                logger.warning("  ⚠️ attention_heatmap.png 仍然存在（应被移除）")
         
         # 原始张量路径
         if 'raw_tensors_path' in results:
@@ -242,6 +272,19 @@ def main():
         logger.info("\n" + "=" * 60)
         logger.info("分析完成！输出目录：" + OUTPUT_DIR)
         logger.info("=" * 60)
+        
+        # 输出使用说明
+        logger.info("\n📊 查看结果建议:")
+        logger.info("  1. 主要图表：token_importance_fusion.png")
+        logger.info("     - 显示原始 ECG 信号 + 注意力热力图叠加")
+        logger.info("     - 红色越深表示模型越关注该时间步")
+        logger.info("  2. 关键区段：key_segments_annotation.png")
+        logger.info("     - 自动检测并标注峰值、谷值、突变点")
+        logger.info("     - 黄色高亮表示重要性 > 0.3 的区域")
+        logger.info("  3. 多层对比：multi_layer_attention_seq.png")
+        logger.info("     - 对比不同 Transformer 层的关注模式")
+        logger.info("     - 浅层关注低层次特征，深层关注高层次模式")
+        logger.info("\n💡 提示：这些图表适用于任何 1D 时序数据（ECG/NLP/金融等）")
         
         # 清理资源
         pipeline.cleanup()

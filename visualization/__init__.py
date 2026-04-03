@@ -11,6 +11,7 @@
 """
 
 from .heatmap import HeatmapRenderer
+from .timeseries_visualizer import TimeSeriesVisualizer
 from .charts import (
     plot_layer_importance,
     plot_head_scatter,
@@ -21,6 +22,7 @@ from .charts import (
 __all__ = [
     # 核心渲染器
     "HeatmapRenderer",
+    "TimeSeriesVisualizer",
     # 通用绘图工具函数
     "plot_layer_importance",
     "plot_head_scatter",

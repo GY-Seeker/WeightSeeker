@@ -50,6 +50,8 @@ class HookManager:
             "attention": {},
             "hidden_state": {},
         }
+        # 梯度存储结构：用于反向Hook捕获梯度
+        self._gradient_storage: Dict[int, Tensor] = {}  # {layer_idx: gradient_tensor}
         # 所有已注册Hook的句柄，用于统一移除
         self._handles: List[RemovableHandle] = []
 
@@ -202,10 +204,14 @@ class HookManager:
         return handle
 
     def register_hidden_state_hook(self, layer_idx: int, module: nn.Module) -> RemovableHandle:
-        """注册隐藏状态Hook。
+        """注册隐藏状态Hook（改进版：支持梯度追踪）。
 
         Hook将捕获指定Block的前向输出（通常为隐藏状态），并存入
         ``_hook_storage["hidden_state"][layer_idx]``。
+        
+        改进点：
+        - 保存带有完整计算图的张量（仅在存储时clone，不detach）
+        - 同时注册反向Hook以捕获梯度信息
 
         Args:
             layer_idx: 逻辑层索引。
@@ -227,11 +233,40 @@ class HookManager:
                 tensor = None
 
             if tensor is not None:
-                self._hook_storage.setdefault("hidden_state", {})[layer_idx] = tensor.detach().clone()
+                # 保存克隆的张量（使用clone避克隆子图窗口问题）
+                stored_tensor = tensor.clone()
+                self._hook_storage.setdefault("hidden_state", {})[layer_idx] = stored_tensor
+                
+                # 关键：在原始张量上直接注册反向Hook（而不是克隆张量）
+                # 因为clone后的非叶张量不会自动还原梯度
+                if tensor.requires_grad:
+                    # 在原始张量上注册反向Hook
+                    # 这样Hook会正常被触发，且敷断图会正常推导梯度
+                    tensor.register_hook(
+                        lambda grad, idx=layer_idx: self._capture_hidden_gradient(idx, grad)
+                    )
 
         handle = module.register_forward_hook(_hook_fn)
         self._handles.append(handle)
         return handle
+    
+    def _capture_hidden_gradient(self, layer_idx: int, gradient: Tensor) -> None:
+        """反向Hook回调：捕获隐藏状态的梯度。
+        
+        Args:
+            layer_idx: 层索引
+            gradient: 从反向传播得到的梯度张量
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"[Hook] 捕获到Layer {layer_idx} 的梯度：{gradient.shape}")
+        
+        # 对特征维度 D 取平均，保留 (B, L) 形状
+        if gradient.dim() == 3:  # (B, L, D)
+            gradient = gradient.mean(dim=-1)  # (B, L)
+        
+        self._gradient_storage[layer_idx] = gradient.detach()  # 存储为常规张量
+        logger.debug(f"[Hook] Layer {layer_idx} 梯度已存储，最终形状：{self._gradient_storage[layer_idx].shape}")
 
     def remove_all_hooks(self) -> None:
         """移除所有注册的Hook并清空缓存。"""
@@ -244,10 +279,26 @@ class HookManager:
         self._handles.clear()
         self._hook_storage["attention"].clear()
         self._hook_storage["hidden_state"].clear()
+        self._gradient_storage.clear()  # 同时清空梯度存储
 
+    def get_hidden_state_gradient(self, layer_idx: int) -> Optional[Tensor]:
+        """获取指定层隐藏状态的梯度（仅在反向传播后可用）。
+            
+        Args:
+            layer_idx: 层索引
+                
+        Returns:
+            Tensor: 梯度张量，形状 (B, L)；如果不可用则返回 None
+        """
+        return self._gradient_storage.get(layer_idx, None)
+        
+    def clear_gradients(self) -> None:
+        """清空梯度存储（通常在新的反向传播前调用）。"""
+        self._gradient_storage.clear()
+    
     def get_attention_output(self, layer_idx: int) -> Tensor:
         """获取指定层的注意力输出。
-
+            
         Args:
             layer_idx: 层索引。
 

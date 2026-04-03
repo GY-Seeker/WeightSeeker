@@ -441,6 +441,9 @@ class AnalysisPipeline:
         assert self._forward_tracker is not None, "组件未初始化"
         assert self._model is not None, "模型未初始化"
 
+        # 保存输入数据用于后续可视化
+        self._last_input_data = input_data.detach().cpu()
+
         forward_result = self._forward_tracker.track(
             model=self._model,
             input_data=input_data,
@@ -583,22 +586,22 @@ class AnalysisPipeline:
                     saved_paths["all_heads_heatmap"] = all_heads_path
                     logger.info("已生成所有头的热力图：%s", all_heads_path)
                 
-                # 2. 传统单头热力图（兼容旧接口）
-                attn_path = os.path.join(output_dir, "attention_heatmap.png")
-                if attention_maps:
-                    first_attn = next(iter(attention_maps.values()))
-                    # 取第一个 batch、第一个 head
-                    if first_attn.dim() == 4:
-                        render_attn = first_attn[0, 0]
-                    elif first_attn.dim() == 3:
-                        render_attn = first_attn[0]
-                    else:
-                        render_attn = first_attn
-                    self._heatmap_renderer.render_attention(
-                        render_attn, title="Attention Heatmap (Layer 0, Head 0)", save_path=attn_path
-                    )
-                    saved_paths["attention_heatmap"] = attn_path
-                    logger.info("已生成单头热力图：%s", attn_path)
+                # ❌【已弃用】传统的单头热力图（无实际意义）
+                # attn_path = os.path.join(output_dir, "attention_heatmap.png")
+                # if attention_maps:
+                #     first_attn = next(iter(attention_maps.values()))
+                #     # 取第一个 batch、第一个 head
+                #     if first_attn.dim() == 4:
+                #         render_attn = first_attn[0, 0]
+                #     elif first_attn.dim() == 3:
+                #         render_attn = first_attn[0]
+                #     else:
+                #         render_attn = first_attn
+                #     self._heatmap_renderer.render_attention(
+                #         render_attn, title="Attention Heatmap (Layer 0, Head 0)", save_path=attn_path
+                #     )
+                #     saved_paths["attention_heatmap"] = attn_path
+                #     logger.info("已生成单头热力图：%s", attn_path)
                     
                 # 3. 多层对比面板
                 if len(attention_maps) > 1:
@@ -615,21 +618,221 @@ class AnalysisPipeline:
             except Exception as e:
                 logger.error("热力图渲染失败：%s", e)
 
+        # ========== 新增：时序数据融合可视化 ==========
+        if self.config.skip_spatial:  # ECG/NLP/时序模型
+            try:
+                from .analyzer.fusion_utils import compute_token_importance
+                from .visualization.timeseries_visualizer import TimeSeriesVisualizer
+                
+                # 1. 计算 token 重要性（融合注意力和梯度）
+                # 改进版本：BackwardTracker 现在返回完整的 (B, L) 梯度而不是标量范数
+                gradient_maps = results.get("gradient_maps", {})
+                hidden_gradients = gradient_maps.get('hidden', {})
+                
+                logger.info("开始时序数据融合可视化...")
+                logger.info(f"  - 注意力图层数：{len(attention_maps)}")
+                logger.info(f"  - 可用梯度层数：{len(hidden_gradients)}")
+                
+                # 检查是否有可用的完整梯度（(B, L) 形状）
+                has_complete_gradients = False
+                for grad in hidden_gradients.values():
+                    if grad.dim() == 2:  # 完整的 (B, L) 梯度
+                        has_complete_gradients = True
+                        break
+                
+                token_importance = None
+                
+                # 尝试使用真实梯度融合
+                if has_complete_gradients:
+                    logger.info("  ✓ 检测到完整的 (B, L) 梯度，使用真实梯度融合")
+                    try:
+                        token_importance = compute_token_importance(
+                            attention_maps=attention_maps,
+                            hidden_gradients=hidden_gradients,
+                            method='gradcam',  # Grad-CAM 融合：梯度 × 注意力
+                        )  # (B, L)
+                        logger.info(f"  ✓ token_importance 计算成功（梯度×注意力融合），形状：{token_importance.shape}")
+                    except Exception as e:
+                        logger.error("梯度融合失败，将回退到纯注意力：%s", e)
+                        import traceback
+                        traceback.print_exc()
+                        token_importance = None
+                else:
+                    logger.warning("  - 未检测到完整的 (B, L) 梯度，将使用纯注意力作为重要性得分")
+                
+                # Fallback: 如果真实梯度不可用，使用纯注意力对角线
+                if token_importance is None:
+                    logger.info("  - 使用纯注意力对角线作为 token 重要性")
+                    diagonals_per_layer = []
+                    for layer_idx, attn in attention_maps.items():
+                        if attn.dim() == 4:  # (B, H, L, L)
+                            B, H, L, _ = attn.shape
+                            diagonal = attn[:, :, range(L), range(L)].mean(dim=1)  # (B, L)
+                            diagonals_per_layer.append(diagonal)
+                        elif attn.dim() == 3:  # (B, L, L)
+                            B, L, _ = attn.shape
+                            diagonal = attn[:, range(L), range(L)]  # (B, L)
+                            diagonals_per_layer.append(diagonal)
+                    
+                    if diagonals_per_layer:
+                        stacked = torch.stack(diagonals_per_layer, dim=0)  # (num_layers, B, L)
+                        token_importance = stacked.mean(dim=0)  # (B, L)
+                        # 归一化到 [0, 1]
+                        from .analyzer.fusion_utils import normalize_for_fusion
+                        token_importance = normalize_for_fusion(token_importance)
+                        logger.info(f"  ✓ token_importance 计算成功（纯注意力），形状：{token_importance.shape}")
+                    
+                    # 2. 获取原始输入数据（从 forward_tracker 或外部传入）
+                    if hasattr(self, '_last_input_data') and token_importance is not None:
+                        sequence = self._last_input_data  # (C, L) 或 (L,)
+                        
+                        # 如果 sequence 是 batch 数据 (B, C, L)，取第一个样本
+                        if sequence.dim() == 3:
+                            sequence = sequence[0]  # (C, L)
+                        logger.info(f"  - 可视化序列形状：{sequence.shape}")
+                        logger.info(f"  - token_importance 形状：{token_importance.shape}")
+                        
+                        # 3. 创建可视化器（统一配置）
+                        ts_vis = TimeSeriesVisualizer(
+                            sampling_rate=None,
+                            time_unit='steps',
+                        )
+                        
+                        # 4. 生成融合可视化图
+                        fusion_path = os.path.join(output_dir, "token_importance_fusion.png")
+                        try:
+                            channel_names = None
+                            if hasattr(self, '_get_channel_names'):
+                                try:
+                                    channel_names = self._get_channel_names()
+                                except Exception:
+                                    pass
+                            
+                            fig = ts_vis.render_sequence_with_attention(
+                                sequence=sequence,
+                                attention_weights=token_importance[0],  # 取第一个样本
+                                channel_names=channel_names,
+                                title="Token Importance (Attention × Gradient Fusion)",
+                                save_path=fusion_path,
+                            )
+                            saved_paths["token_importance_fusion"] = fusion_path
+                            logger.info("已生成融合可视化：%s", fusion_path)
+                        except Exception as e:
+                            logger.error("render_sequence_with_attention 失败：%s", e)
+                            import traceback
+                            traceback.print_exc()
+                        
+                        # 5. 检测关键位置并标注
+                        sequence_np = sequence.cpu().numpy()
+                        if sequence_np.ndim == 2:
+                            signal_for_detection = sequence_np[0]  # 取第一个通道
+                        else:
+                            signal_for_detection = sequence_np
+                        
+                        key_positions = ts_vis.detect_key_positions(
+                            signal_for_detection,
+                            method='auto'
+                        )
+                        
+                        annotation_path = os.path.join(output_dir, "key_segments_annotation.png")
+                        fig = ts_vis.render_sequence_with_attention(
+                            sequence=sequence,
+                            attention_weights=token_importance[0],
+                            key_positions=key_positions,
+                            title="Key Segments Annotation",
+                            save_path=annotation_path,
+                        )
+                        saved_paths["key_segments_annotation"] = annotation_path
+                        logger.info("已生成关键区段标注：%s", annotation_path)
+                        
+                        # 6. 多层注意力对比
+                        if len(attention_maps) > 1:
+                            multi_layer_seq_path = os.path.join(output_dir, "multi_layer_attention_seq.png")
+                            layer_sequences = {
+                                layer_idx: attn.mean(dim=(0, 1))[0]  # 平均所有头和 batch
+                                for layer_idx, attn in attention_maps.items()
+                            }
+                            fig = ts_vis.render_multi_layer_comparison(
+                                layer_sequences=layer_sequences,
+                                sequence=sequence,
+                                save_path=multi_layer_seq_path,
+                            )
+                            saved_paths["multi_layer_attention_seq"] = multi_layer_seq_path
+                            logger.info("已生成多层注意力对比：%s", multi_layer_seq_path)
+                    
+            except Exception as e:
+                logger.error("时序数据融合可视化失败：%s", e)
+
         # charts（骨架未实现时跳过）
         try:
-            from .visualization.charts import plot_layer_importance, plot_accumulator_stats
+            from .visualization.charts import plot_layer_importance, plot_head_scatter
             single = results.get("single_sample", {})
             layer_importance = single.get("layer_importance", {})
             if layer_importance:
                 li_path = os.path.join(output_dir, "layer_importance.png")
                 fig = plot_layer_importance(layer_importance, save_path=li_path)
                 saved_paths["layer_importance"] = li_path
+            
+            # 新增：头频率 - 重要性散点图（需要累积器数据）
+            if not self.config.skip_global_diagnosis and self._accumulator is not None:
+                acc_state = self._accumulator.get_statistics()
+                scatter_path = os.path.join(output_dir, "head_frequency_importance_scatter.png")
+                fig = plot_head_scatter(
+                    frequency_data=[],
+                    importance_data=[],
+                    head_freq=acc_state.head_activation_freq,
+                    head_concentration=acc_state.head_attention_concentration,
+                    title="Head Frequency vs Importance (Quadrant Analysis)",
+                    save_path=scatter_path,
+                )
+                saved_paths["head_scatter"] = scatter_path
         except NotImplementedError:
             logger.debug("charts 尚未实现，跳过统计图生成")
         except Exception as e:
             logger.error("统计图生成失败：%s", e)
 
-        # 累积器统计图
+        # 四象限分析图（新增）
+        if not self.config.skip_spatial and self._heatmap_renderer is not None:
+            try:
+                from .analyzer.quadrant import QuadrantAnalyzer
+                quadrant_analyzer = QuadrantAnalyzer(threshold_method="median")
+                
+                # 取第一层做示例
+                if attention_maps and hidden_states:
+                    first_layer = min(attention_maps.keys())
+                    attn = attention_maps[first_layer]
+                    grad = hidden_states.get(first_layer, attn)
+                    
+                    # 如果是序列数据，跳过空间重构但保留四象限概念
+                    if self.config.skip_spatial:
+                        # 1D 序列模型：将序列视为 1D 空间
+                        logger.info("生成序列数据的四象限分析...")
+                    else:
+                        # 图像模型：正常的 2D 四象限
+                        logger.info("生成图像数据的四象限分析...")
+                    
+                    # 计算四象限分布
+                    quad_map = quadrant_analyzer.generate_quadrant_map(attn[0, 0], grad[0] if grad.dim() > 0 else attn[0, 0])
+                    quad_stats = quadrant_analyzer.compute_quadrant_statistics(quad_map)
+                    
+                    # 保存四象限统计到文本文件
+                    quad_txt_path = os.path.join(output_dir, "quadrant_analysis.txt")
+                    with open(quad_txt_path, "w", encoding="utf-8") as f:
+                        f.write("四象限分析报告\n")
+                        f.write("=" * 50 + "\n\n")
+                        f.write(f"分析层：Layer {first_layer}\n")
+                        f.write(f"阈值方法：中位数\n\n")
+                        for quadrant, ratio in quad_stats.items():
+                            f.write(f"{quadrant.name}: {ratio*100:.2f}%\n")
+                        f.write("\n说明：\n")
+                        f.write("- 核心判别区：高注意力 + 高梯度（真正重要的区域）\n")
+                        f.write("- 冗余关注区：高注意力 + 低梯度（可能是噪声）\n")
+                        f.write("- 潜在影响区：低注意力 + 高梯度（隐性影响因素）\n")
+                        f.write("- 无关区域：低注意力 + 低梯度\n")
+                    saved_paths["quadrant_analysis"] = quad_txt_path
+                    logger.info("已生成四象限分析：%s", quad_txt_path)
+            except Exception as e:
+                logger.error("四象限分析失败：%s", e)
         if not self.config.skip_global_diagnosis and self._accumulator is not None:
             try:
                 from .visualization.charts import plot_accumulator_stats
@@ -641,6 +844,18 @@ class AnalysisPipeline:
                 logger.debug("plot_accumulator_stats 尚未实现")
             except Exception as e:
                 logger.error("累积器统计图生成失败：%s", e)
+        
+        # 生成综合分析报告（新增）
+        if not self.config.skip_global_diagnosis and self._accumulator is not None:
+            try:
+                from .utils.report_generator import generate_analysis_report
+                report_path = os.path.join(output_dir, "analysis_report.md")
+                acc_state = self._accumulator.get_statistics()
+                generate_analysis_report(results, acc_state, report_path)
+                saved_paths["analysis_report"] = report_path
+                logger.info("已生成分析报告：%s", report_path)
+            except Exception as e:
+                logger.error("报告生成失败：%s", e)
 
         return saved_paths
 

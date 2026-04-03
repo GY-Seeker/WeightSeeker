@@ -5,6 +5,7 @@
 """
 
 from typing import Any, Dict, Optional
+import logging
 
 import torch
 import torch.nn as nn
@@ -13,12 +14,18 @@ from ..core.types import Tensor
 from ..model_adapter.hooks import HookManager
 from .metrics import MetricsCalculator
 
+logger = logging.getLogger(__name__)
+
 
 class BackwardTracker:
     """反向传播追踪器。
 
     负责执行反向传播并计算各类梯度，包括输入梯度、隐藏状态梯度和注意力梯度。
-    梯度计算采用 L2 范数，对 batch 维度取平均。
+    
+    梯度计算方式（改进版）：
+    - 隐藏状态梯度：保留完整的逐点梯度 (B, L) 而非标量范数，支持 Grad-CAM 融合
+    - 输入梯度：仍使用 L2 范数以降低内存开销
+    - 注意力梯度：由于 PyTorch 限制无法获取
 
     Attributes:
         _model: 模型实例
@@ -45,12 +52,12 @@ class BackwardTracker:
         流程：
         1. 执行反向传播：loss.backward(retain_graph=True)
         2. 收集各类梯度：
-           - 输入梯度：如果 input_data 有 grad，提取 input_data.grad
+           - 输入梯度：如果 input_data 有 grad，提取输入梯度的 L2 范数（标量）
            - 隐藏状态梯度：遍历模型模块，查找 TransformerEncoderLayer，
-             获取其输出的梯度
+             获取其隐藏状态的完整梯度 (B, L)，用于 Grad-CAM 融合
            - 注意力梯度：由于 nn.MultiheadAttention 的注意力权重是 detach 的，
              暂时无法获取（返回空字典）
-        3. 梯度计算方式：L2范数，对 batch 维度取平均
+        3. 隐藏状态梯度：保留完整形状 (B, L)，对特征维度 (D) 取平均
     
         Args:
             loss: 损失张量
@@ -58,12 +65,17 @@ class BackwardTracker:
     
         Returns:
             Dict: 包含以下键的字典：
-                - "input": Tensor，输入梯度（L2 范数，batch 平均）
-                - "hidden": Dict[int, Tensor]，各层隐藏状态梯度
+                - "input": Tensor，输入梯度（L2 范数，标量）
+                - "hidden": Dict[int, Tensor]，各层隐藏状态梯度，形状 (B, L)
                 - "attention": Dict[int, Tensor]，各层注意力梯度
         """
         # 清除之前的梯度
         self._model.zero_grad()
+        # 清空HookManager中的旧梯度主业（为了载入新的梯度）
+        try:
+            self._hook_manager.clear_gradients()
+        except AttributeError:
+            pass  # 如果HookManager不支持，不能压
         if input_data is not None and input_data.grad is not None:
             input_data.grad.zero_()
     
@@ -117,49 +129,70 @@ class BackwardTracker:
         return grad_norm
     
     def _compute_all_hidden_gradients(self) -> Dict[int, Tensor]:
-        """计算所有 TransformerEncoderLayer 的隐藏状态梯度。
-            
-        遍历模型找到所有 TransformerEncoderLayer，获取它们的输出梯度。
-        由于 HookManager 在前向时使用了 detach()，我们需要直接从模块的输出获取梯度。
-            
+        """计算所有 TransformerEncoderLayer 的隐藏状态梯度（改进版）。
+                
+        优先级顺序：
+        1. 先尝试从 HookManager 的 _gradient_storage 中获取反向Hook捕获的梯度 (B, L)
+        2. 如果 Hook 梯度不可用，回退到 compute_hidden_gradient()方法（尝试捕获隐藏状态）
+        3. 如果那也不行，最后回退到从参数梯度推断
+                
         Returns:
-            Dict[int, Tensor]: {layer_idx: gradient_norm} 字典
+            Dict[int, Tensor]: {layer_idx: gradient_tensor} 字典，
+                               gradient_tensor 形状为 (B, L) 或标量
         """
         gradients: Dict[int, Tensor] = {}
         layer_idx = 0
-            
+                
         for name, module in self._model.named_modules():
             if isinstance(module, nn.TransformerEncoderLayer):
-                # 尝试从模块的输出获取梯度
-                # 注意：PyTorch 中模块本身不保存输出，需要通过 hook 捕获
-                # 但由于前向 hook 已经 detach，我们只能从该层的参数梯度推断
+                # 方法 1：优先：从 HookManager 的反向Hook蒸存中获取梯度 (B, L)
+                try:
+                    hook_gradient = self._hook_manager.get_hidden_state_gradient(layer_idx)
+                    if hook_gradient is not None:
+                        gradients[layer_idx] = hook_gradient
+                        logger.debug(f"层 {layer_idx}: 从 Hook 奖应位获取梯度 {hook_gradient.shape}")
+                        layer_idx += 1
+                        continue
+                except (AttributeError, KeyError):
+                    pass
                     
-                # 替代方案：检查该层主要参数的梯度
-                # TransformerEncoderLayer 的主要输出是其 linear2 的输出
+                # 方法 2：次优先：会试从隐藏状态直接获取梯度
+                try:
+                    hidden_grad = self.compute_hidden_gradient(layer_idx)
+                    if hidden_grad is not None:
+                        gradients[layer_idx] = hidden_grad
+                        layer_idx += 1
+                        continue
+                except Exception:
+                    pass
+                    
+                # 方法 3：最后回退：从参数梯度推断
                 output_layer = getattr(module, 'linear2', None)
                 if output_layer is not None and hasattr(output_layer, 'weight'):
                     if output_layer.weight.grad is not None:
-                        # 使用该层权重的梯度作为代理
+                        # 从参数梯度推断
                         grad_norm = MetricsCalculator.compute_l2_norm(output_layer.weight.grad)
                         if grad_norm.dim() > 0:
                             grad_norm = grad_norm.mean()
                         gradients[layer_idx] = grad_norm
-                    
+                        logger.debug(f"层 {layer_idx}: 从参数梯度推断，返回标量 ")
+                         
                 layer_idx += 1
-            
+                
         return gradients
 
     def compute_hidden_gradient(self, layer_idx: int) -> Optional[Tensor]:
-        """计算隐藏状态梯度。
+        """计算隐藏状态梯度（改进版，返回完整梯度而非标量）。
 
         从 hook_manager 获取该层的隐藏状态，如果隐藏状态有 grad，
-        返回梯度的 L2 范数（对 batch 维平均）。
+        返回完整梯度张量 (B, L)，而非 L2 范数标量。
+        对特征维度 D 取平均以降低维度。
 
         Args:
             layer_idx: 层索引
 
         Returns:
-            Tensor: 梯度的 L2 范数（batch 平均后），如果无梯度则返回 None
+            Tensor: 隐藏状态梯度，形状 (B, L)；如果无梯度则返回 None
         """
         try:
             hidden_state = self._hook_manager.get_hidden_state(layer_idx)
@@ -169,12 +202,20 @@ class BackwardTracker:
         if hidden_state.grad is None:
             return None
 
-        # 计算 L2 范数
-        grad_norm = MetricsCalculator.compute_l2_norm(hidden_state.grad)
-        # 对 batch 维度取平均（如果有多维）
-        if grad_norm.dim() > 0:
-            grad_norm = grad_norm.mean()
-        return grad_norm
+        # 获取完整梯度，对特征维度 D 取平均
+        grad = hidden_state.grad  # (B, L, D) 或 (B, L) 或其他
+        
+        # 对特征维度取平均，保留 (B, L)
+        if grad.dim() == 3:  # (B, L, D)
+            grad = grad.mean(dim=-1)  # (B, L)
+        elif grad.dim() == 2:  # (B, L) - 已经是目标形状
+            pass
+        elif grad.dim() == 1:  # (L,) - 缺少 batch 维
+            # 可能没有 batch 维，使用 unsqueeze 添加
+            grad = grad.unsqueeze(0)  # (1, L)
+        # 其他维度情况则不做处理，返回原始梯度
+        
+        return grad
 
     def compute_attention_gradient(self, layer_idx: int) -> Optional[Tensor]:
         """计算注意力梯度。
