@@ -1119,7 +1119,8 @@ class AnalysisPipeline:
                         fig = self._heatmap_renderer.render_quadrant_map(
                             quad_map_1d.unsqueeze(0).unsqueeze(-1),  # 转为 (1, L, 1) 用于渲染
                             title=f"Four Quadrant Analysis (Sequence Data, Layer {first_layer})",
-                            save_path=quad_viz_path
+                            save_path=quad_viz_path,
+                            original_signal=self._last_input_data if hasattr(self, '_last_input_data') else None  # 传入原始波形数据
                         )
                         saved_paths["quadrant_viz_seq"] = quad_viz_path
                         logger.info("已生成序列四象限热力图：%s", quad_viz_path)

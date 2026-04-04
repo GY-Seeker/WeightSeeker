@@ -235,12 +235,6 @@ def main():
                 if key in vis_paths:
                     logger.info(f"  ✓ {key}: {desc}")
             
-            logger.info("\n【已弃用的图表】:")
-            if 'attention_heatmap' not in vis_paths:
-                logger.info("  ❌ attention_heatmap.png 已成功弃用（不再作为主要输出）")
-            else:
-                logger.warning("  ⚠️ attention_heatmap.png 仍然存在（应被移除）")
-        
         # 原始张量路径
         if 'raw_tensors_path' in results:
             logger.info(f"\n原始张量已保存：{results['raw_tensors_path']}")

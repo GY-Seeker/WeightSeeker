@@ -351,6 +351,7 @@ class HeatmapRenderer:
         save_path: Optional[str] = None,
         background_image: Optional[Tensor] = None,
         alpha: float = 0.6,
+        original_signal: Optional[Tensor] = None,  # 新增：原始波形数据
     ) -> Optional[Figure]:
         """
         渲染四象限图，使用离散 colormap（4 种颜色）。
@@ -362,6 +363,7 @@ class HeatmapRenderer:
             save_path: 保存路径，None 则返回 Figure，传入则保存并 close。
             background_image: 背景原图 (C, H, W) 或 (H, W, C)，如果有则叠加显示。
             alpha: 四象限图透明度（0-1），默认 0.6。
+            original_signal: 原始 1D 波形数据 (1, C, L) 或 (C, L)，用于叠加显示。
     
         Returns:
             Figure 对象（save_path=None 时）或 None（保存后 close）。
@@ -376,9 +378,58 @@ class HeatmapRenderer:
         # 处理 1D 序列数据：(1, L, 1) -> 展平为水平条形图
         if arr.ndim == 3 and arr.shape[0] == 1 and arr.shape[2] == 1:
             arr_1d = arr[0, :, 0]  # (L,)
-            # 创建水平条形图
             L = len(arr_1d)
-            im = ax.imshow(arr_1d.reshape(1, -1), cmap=cmap_q, norm=norm, 
+            
+            # 如果有原始波形数据，创建双子图
+            if original_signal is not None:
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(self.figsize[0], self.figsize[1]*1.3), 
+                                               dpi=self.dpi, gridspec_kw={'height_ratios': [4, 1]})
+                
+                # 上图：原始波形
+                sig = original_signal.detach().cpu().float()
+                
+                # 处理 batch 维度：取第一个样本
+                if sig.ndim == 3:
+                    sig = sig[0]  # (B, C, L) -> (C, L)
+    
+                # 处理多导联：取平均或第一个
+                if sig.ndim == 2:
+                    if sig.shape[0] > 1:
+                        sig = sig.mean(dim=0)  # (C, L) -> (L,) 多导联平均
+                    else:
+                        sig = sig.squeeze(0)  # (1, L) -> (L,)
+                
+                # 归一化波形到 [-1, 1]
+                sig_max = sig.abs().max()
+                if sig_max > 0:
+                    sig = sig / sig_max
+                
+                ax1.plot(sig.numpy(), color='#2c3e50', linewidth=0.8, alpha=0.8)
+                ax1.set_ylabel("Normalized Amplitude", fontsize=9)
+                ax1.set_title(title if title else "Original Signal + Quadrant Analysis", fontsize=11)
+                ax1.grid(True, alpha=0.3)
+                ax1.set_xticks([])
+                
+                # 下图：四象限分布
+                im = ax2.imshow(arr_1d.reshape(1, -1), cmap=cmap_q, norm=norm,
+                               interpolation="nearest", aspect="auto")
+                ax2.set_xlim(0, L)
+                ax2.set_yticks([])
+                ax2.set_xlabel("Sequence Position (Token)", fontsize=9)
+                
+                # 添加图例
+                labels = ["Core Discriminative", "Redundant Attention",
+                          "Potential Influence", "Irrelevant"]
+                import matplotlib.patches as mpatches
+                patches = [mpatches.Patch(color=self._QUADRANT_COLORS[i], label=labels[i])
+                           for i in range(4)]
+                ax2.legend(handles=patches, loc="lower right", fontsize=7)
+                
+                plt.tight_layout()
+                return self._save_and_close(fig, save_path)
+            
+            # 无波形数据：仅显示四象限（继续执行后续代码）
+            im = ax.imshow(arr_1d.reshape(1, -1), cmap=cmap_q, norm=norm,
                           interpolation="nearest", aspect="auto")
             ax.set_xlim(0, L)
             ax.set_yticks([])
@@ -404,8 +455,8 @@ class HeatmapRenderer:
             ax.set_title(title, fontsize=11)
             
         # 添加图例
-        labels = ["Core Discriminative\n(核心判别区)", "Redundant Attention\n(冗余关注区)",
-                  "Potential Influence\n(潜在影响区)", "Irrelevant\n(无关区域)"]
+        labels = ["Core Discriminative", "Redundant Attention",
+                  "Potential Influence", "Irrelevant"]
         import matplotlib.patches as mpatches
         patches = [mpatches.Patch(color=self._QUADRANT_COLORS[i], label=labels[i])
                    for i in range(4)]
