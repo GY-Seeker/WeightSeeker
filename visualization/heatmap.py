@@ -380,12 +380,21 @@ class HeatmapRenderer:
             arr_1d = arr[0, :, 0]  # (L,)
             L = len(arr_1d)
             
-            # 如果有原始波形数据，创建双子图
+            # 如果有原始波形数据，创建单图并叠加四象限背景
             if original_signal is not None:
-                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(self.figsize[0], self.figsize[1]*1.3), 
-                                               dpi=self.dpi, gridspec_kw={'height_ratios': [4, 1]})
+                fig, ax1 = plt.subplots(figsize=(self.figsize[0], self.figsize[1]*0.8), 
+                                        dpi=self.dpi)
                 
-                # 上图：原始波形
+                # 先绘制四象限颜色背景
+                # 创建与信号长度对应的四象限背景
+                bg_data = arr_1d.reshape(1, -1)  # (1, L)
+                # 使用 extent 让颜色块精确对齐 x 轴
+                ax1.imshow(bg_data, cmap=cmap_q, norm=norm,
+                          interpolation="nearest", aspect="auto",
+                          extent=[0, L, -1.2, 1.2],  # x: [0, L], y: [-1.2, 1.2]
+                          alpha=0.25)  # 透明度较低，不干扰波形
+                
+                # 处理原始波形
                 sig = original_signal.detach().cpu().float()
                 
                 # 处理 batch 维度：取第一个样本
@@ -404,26 +413,22 @@ class HeatmapRenderer:
                 if sig_max > 0:
                     sig = sig / sig_max
                 
-                ax1.plot(sig.numpy(), color='#2c3e50', linewidth=0.8, alpha=0.8)
+                # 绘制波形（在四象限背景之上）
+                ax1.plot(sig.numpy(), color='#2c3e50', linewidth=1.0, alpha=0.9, zorder=10)
                 ax1.set_ylabel("Normalized Amplitude", fontsize=9)
                 ax1.set_title(title if title else "Original Signal + Quadrant Analysis", fontsize=11)
-                ax1.grid(True, alpha=0.3)
-                ax1.set_xticks([])
-                
-                # 下图：四象限分布
-                im = ax2.imshow(arr_1d.reshape(1, -1), cmap=cmap_q, norm=norm,
-                               interpolation="nearest", aspect="auto")
-                ax2.set_xlim(0, L)
-                ax2.set_yticks([])
-                ax2.set_xlabel("Sequence Position (Token)", fontsize=9)
+                ax1.set_xlim(0, L)
+                ax1.set_ylim(-1.15, 1.15)
+                ax1.grid(True, alpha=0.2, zorder=5)
+                ax1.set_xlabel("Sequence Position (Token)", fontsize=9)
                 
                 # 添加图例
                 labels = ["Core Discriminative", "Redundant Attention",
                           "Potential Influence", "Irrelevant"]
                 import matplotlib.patches as mpatches
-                patches = [mpatches.Patch(color=self._QUADRANT_COLORS[i], label=labels[i])
+                patches = [mpatches.Patch(color=self._QUADRANT_COLORS[i], label=labels[i], alpha=0.25)
                            for i in range(4)]
-                ax2.legend(handles=patches, loc="lower right", fontsize=7)
+                ax1.legend(handles=patches, loc="upper right", fontsize=7, framealpha=0.9)
                 
                 plt.tight_layout()
                 return self._save_and_close(fig, save_path)
