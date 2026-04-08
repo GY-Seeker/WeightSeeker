@@ -24,6 +24,7 @@ from .global_diagnosis import GlobalDiagnosisEngine
 from .quadrant import QuadrantAnalyzer
 from .anomaly_detector import AnomalyDetector
 from .fusion_utils import weighted_sum_fusion, gradcam_fusion, normalize_for_fusion
+from .token_importance import compute_token_importance_with_fallback
 
 __all__ = [
     "SingleSampleAnalyzer",
@@ -33,4 +34,5 @@ __all__ = [
     "weighted_sum_fusion",
     "gradcam_fusion",
     "normalize_for_fusion",
+    "compute_token_importance_with_fallback",
 ]

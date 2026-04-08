@@ -21,6 +21,7 @@ Patch 粒度重构回像素空间，并完成跨层的数值对齐（归一化�
 from .reshaper import SpatialReshaper
 from .normalizer import Normalizer
 from .interpolator import Interpolator
+from .shape_utils import extract_attn_2d, extract_grad_2d, process_multi_layer_attention
 
 # 别名，与需求文档保持一致
 SpatialNormalizer = Normalizer
@@ -32,4 +33,7 @@ __all__ = [
     "Interpolator",
     "SpatialNormalizer",
     "SpatialInterpolator",
+    "extract_attn_2d",
+    "extract_grad_2d",
+    "process_multi_layer_attention",
 ]

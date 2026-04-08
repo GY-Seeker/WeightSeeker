@@ -20,12 +20,16 @@ from .charts import (
     plot_accumulator_stats,
     save_figure,
 )
+from .manager import VisualizationManager
 
 __all__ = [
     # 核心渲染器
     "HeatmapRenderer",
     "TimeSeriesVisualizer",
-    "ImageVisualizer",     # 通用绘图工具函数
+    "ImageVisualizer",
+    # 管理器
+    "VisualizationManager",
+    # 通用绘图工具函数
     "plot_layer_importance",
     "plot_head_scatter",
     "plot_accumulator_stats",
