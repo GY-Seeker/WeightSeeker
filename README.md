@@ -30,10 +30,8 @@ Transformer Analyzer 是一款专业的**模型可解释性分析工具**，专�
 
 ### 支持的架构
 
-✅ **标准 Transformer** - 支持经典的 Encoder-Decoder 架构  
-✅ **ViT (Vision Transformer)** - 支持图像分类、检测任务  
-✅ **Swin Transformer** - 支持窗口注意力机制和多尺度特征  
-✅ **MoE-Transformer** - 支持混合专家架构的路由分析  
+✅ **Transformer** - 支持Transformer相关的注意力跟踪  
+
 
 ### 核心功能
 
