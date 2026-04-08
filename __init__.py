@@ -32,8 +32,6 @@ from .core.exceptions import (
 # 模型适配模块
 from .model_adapter.detector import ArchitectureDetector
 from .model_adapter.hooks import HookManager, AttentionHook
-from .model_adapter.swin_handler import SwinHandler
-from .model_adapter.moe_handler import MoEHandler
 
 # 追踪模块
 from .tracker.forward_tracker import ForwardTracker
@@ -60,18 +58,6 @@ from .visualization.charts import (
     plot_accumulator_stats,
     save_figure,
 )
-# from .visualization.exporters import ResultExporter  # 未来扩展
-# from .visualization.dashboard import Dashboard  # 未来扩展
-
-# 数据管理模块
-from .data_manager.model_loader import ModelLoader
-from .data_manager.data_loader import DataManager
-from .data_manager.preprocessor import Preprocessor
-
-# 工具模块
-from .utils.tensor_utils import TensorUtils
-from .utils.memory_utils import MemoryManager
-from .utils.io_utils import IOUtils
 
 # 主入口
 from .pipeline import AnalysisPipeline
@@ -104,8 +90,6 @@ __all__ = [
     "ArchitectureDetector",
     "HookManager",
     "AttentionHook",
-    "SwinHandler",
-    "MoEHandler",
     # 追踪
     "ForwardTracker",
     "BackwardTracker",
@@ -126,16 +110,6 @@ __all__ = [
     "plot_head_scatter",
     "plot_accumulator_stats",
     "save_figure",
-    # "ResultExporter",  # 未来扩展
-    # "Dashboard",  # 未来扩展
-    # 数据管理
-    "ModelLoader",
-    "DataManager",
-    "Preprocessor",
-    # 工具
-    "TensorUtils",
-    "MemoryManager",
-    "IOUtils",
     # 主入口
     "AnalysisPipeline",
 ]
