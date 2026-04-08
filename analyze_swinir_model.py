@@ -42,7 +42,7 @@ except ImportError as e:
     logger.info("提示：可能需要安装依赖：pip install vector_quantize_pytorch")
     raise
 
-from pipeline import AnalysisPipeline, PipelineConfig
+from transformer_analyzer.pipeline import AnalysisPipeline, PipelineConfig
 
 
 def load_real_images(data_dir, img_size=256, max_samples=10):

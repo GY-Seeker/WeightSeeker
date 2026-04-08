@@ -17,7 +17,7 @@ import logging
 # 添加项目根目录到 sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pipeline import AnalysisPipeline, PipelineConfig
+from transformer_analyzer.pipeline import AnalysisPipeline, PipelineConfig
 
 # 测试模型导入（从 tests/test_model 目录）
 TEST_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tests', 'test_model')
